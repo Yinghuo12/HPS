@@ -1,0 +1,4 @@
+/home/yinghuo/code/sylar/build/CMakeFiles/sylar.dir
+/home/yinghuo/code/sylar/build/CMakeFiles/test.dir
+/home/yinghuo/code/sylar/build/CMakeFiles/edit_cache.dir
+/home/yinghuo/code/sylar/build/CMakeFiles/rebuild_cache.dir
