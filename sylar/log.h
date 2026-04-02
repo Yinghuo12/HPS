@@ -11,6 +11,7 @@
 #include <stdarg.h>
 #include <map>
 #include "singleton.h"
+#include "util.h"
 
 // 日志宏定义
 #define SYLAR_LOG_LEVEL(logger, level) \
@@ -33,6 +34,8 @@
 #define SYLAR_LOG_FMT_WARN(logger, fmt, ...)  SYLAR_LOG_FMT_LEVEL(logger, sylar::LogLevel::WARN, fmt, __VA_ARGS__)
 #define SYLAR_LOG_FMT_ERROR(logger, fmt, ...) SYLAR_LOG_FMT_LEVEL(logger, sylar::LogLevel::ERROR, fmt, __VA_ARGS__)
 #define SYLAR_LOG_FMT_FATAL(logger, fmt, ...) SYLAR_LOG_FMT_LEVEL(logger, sylar::LogLevel::FATAL, fmt, __VA_ARGS__)
+
+#define SYLAR_LOG_ROOT() sylar::LoggerMgr::GetInstance()->getRoot()  // 获取全局的root日志器
 
 
 namespace sylar {
@@ -210,8 +213,10 @@ private:
 class LoggerManager {
 public:
     LoggerManager();
+    // void init();
+
     Logger::ptr getLogger(const std::string& name);
-    void init();
+    Logger::ptr getRoot() const { return m_root; }
 private:
     std::map<std::string, Logger::ptr> m_loggers;
     Logger::ptr m_root;

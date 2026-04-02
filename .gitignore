@@ -1,0 +1,13 @@
+# 编译输出
+build/**
+!build/
+
+# git
+**/.git/
+
+# 第三方库
+include/boost/**
+!include/boost/
+
+include/yaml-cpp/**
+!include/yaml-cpp/
