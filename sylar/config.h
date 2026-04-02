@@ -330,8 +330,8 @@ public:
     static typename ConfigVar<T>::ptr Lookup(const std::string& name, const T& default_value, const std::string& description = "") {  // 为什么要加typename？因为ConfigVar<T>::ptr是一个依赖于模板参数T的类型，编译器在解析时无法确定它是否是一个类型，所以需要加typename告诉编译器这是一个类型。
         // 1. 查找配置项
         // 优化：检测同名不同类型的配置项，输出错误日志
-        auto it = s_datas.find(name);
-        if (it != s_datas.end()) {
+        auto it = GetDatas().find(name);
+        if (it != GetDatas().end()) {
             auto tmp = std::dynamic_pointer_cast<ConfigVar<T> >(it->second);
             if (tmp) {
                 SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "Lookup name=" << name << " exists";
@@ -356,15 +356,15 @@ public:
 
         // 3. 创建新的配置项
         typename ConfigVar<T>::ptr v(new ConfigVar<T>(name, default_value, description));
-        s_datas[name] = v;
+        GetDatas()[name] = v;
         return v;
     }
 
     // 版本二：配置项查找，返回nullptr表示没有找到
     template<class T>
     static typename ConfigVar<T>::ptr Lookup(const std::string& name) {
-        auto it = s_datas.find(name);
-        if (it == s_datas.end()) {
+        auto it = GetDatas().find(name);
+        if (it == GetDatas().end()) {
             return nullptr;
         }
         // map 里存的是 基类指针 ConfigVarBase  但实际里面都是 子类 ConfigVar<T>
@@ -375,7 +375,12 @@ public:
     static ConfigVarBase::ptr LookupBase(const std::string& name);  // 查找配置项基类指针，返回nullptr表示没有找到
 
 private:
-    static ConfigVarMap s_datas;  // 存储所有配置项的map，key为配置项名称，value为配置项对象的智能指针
+    // static ConfigVarMap s_datas;  // 存储所有配置项的map，key为配置项名称，value为配置项对象的智能指针
+    // 修改bug: 全局变量初始化顺序不确定，项目中大量使用全局配置变量，s_datas可能在还没创建时就去使用它，导致程序崩溃。采用函数内静态变量，第一次调用函数时才初始化
+    static ConfigVarMap& GetDatas() {
+        static ConfigVarMap s_datas;
+        return s_datas;
+    }
 };
 
 }

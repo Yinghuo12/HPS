@@ -1,7 +1,9 @@
 #include "sylar/config.h"
 #include "sylar/log.h"
 #include <yaml-cpp/yaml.h>
+#include <iostream>
 
+#if 0  // 测试代码
 // 注册全局配置项
 sylar::ConfigVar<int>::ptr g_int_value_config = sylar::Config::Lookup("system.port", (int)8080, "system port");
 // sylar::ConfigVar<float>::ptr g_int_value2_config = sylar::Config::Lookup("system.port", (float)8080, "system port");  // 同名配置项不同类型，输出错误日志
@@ -96,7 +98,7 @@ void test_config(){
     XX_M(g_str_int_unordered_map_value_config, str_int_unordered_map, after);
 }
 
-
+#endif
 
 // 自定义类 的配置项
 class Person {
@@ -178,22 +180,43 @@ void test_class() {
     SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "before: " << g_person_vec_map->toString();
     
 
-    YAML::Node root = YAML::LoadFile("../bin/conf/log.yml");
+    YAML::Node root = YAML::LoadFile("../bin/conf/test.yml");
     sylar::Config::LoadFromYaml(root);
 
     SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "after: " << g_person->getValue().toString() << " - " << g_person->toString();
     XX_PM(g_person_map, "class.map after");
     SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "after: " << g_person_vec_map->toString();
 
-
 }
 
+void test_log(){
+    static sylar::Logger::ptr system_log = SYLAR_LOG_NAME("system");
+    SYLAR_LOG_INFO(system_log) << "hello ststem" << std::endl;
+
+    std::cout << sylar::LoggerMgr::GetInstance()->toYamlString() << std::endl;
+    YAML::Node root = YAML::LoadFile("../bin/conf/test.yml");
+
+    std::cout << "===============================================================" << std::endl;
+
+    sylar::Config::LoadFromYaml(root);
+    std::cout << sylar::LoggerMgr::GetInstance()->toYamlString() << std::endl;
+
+    std::cout << "===============================================================" << std::endl;
+
+    std::cout << root << std::endl;     // 输出yaml文件内容
+    SYLAR_LOG_INFO(system_log) << "hello ststem" << std::endl;
+    
+    system_log->setFormatter("%d - %m%n");
+    SYLAR_LOG_INFO(system_log) << "hello ststem" << std::endl;
+
+}
 
 int main(int argc, char** argv) {
     
     // test_yaml();
     // test_config();
-    test_class();
+    // test_class();
+    test_log();
 
     return 0;
 }

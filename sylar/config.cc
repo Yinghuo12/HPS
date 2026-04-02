@@ -1,12 +1,11 @@
 #include "sylar/config.h"
 
 namespace sylar {
-Config::ConfigVarMap Config::s_datas;   // 静态成员变量必须在类外定义
 
 // 通过名字查找配置项，返回配置项基类指针，返回nullptr表示没有找到
 ConfigVarBase::ptr Config::LookupBase(const std::string& name) {
-    auto it = s_datas.find(name);
-    return it == s_datas.end() ? nullptr : it->second;
+    auto it = GetDatas().find(name);
+    return it == GetDatas().end() ? nullptr : it->second;
 }
 
 //"A.B", 10
