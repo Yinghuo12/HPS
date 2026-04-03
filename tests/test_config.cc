@@ -3,7 +3,7 @@
 #include <yaml-cpp/yaml.h>
 #include <iostream>
 
-#if 0  // 测试代码
+#if 1  // 测试代码
 // 注册全局配置项
 sylar::ConfigVar<int>::ptr g_int_value_config = sylar::Config::Lookup("system.port", (int)8080, "system port");
 // sylar::ConfigVar<float>::ptr g_int_value2_config = sylar::Config::Lookup("system.port", (float)8080, "system port");  // 同名配置项不同类型，输出错误日志
@@ -170,8 +170,8 @@ void test_class() {
         SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << prefix << ": size=" << m.size(); \
     } \
 
-    // 测试配置项变更回调函数 第一个参数是优先级 优先级数字越小，监听器越先执行  10：普通日志   20: 业务级   30:系统级
-    g_person->addListener(10, [](const Person& old_value, const Person& new_value){ 
+    // 测试配置项变更回调函数
+    g_person->addListener([](const Person& old_value, const Person& new_value){ 
         SYLAR_LOG_INFO(SYLAR_LOG_ROOT()) << "old_value=" << old_value.toString() << " new_value=" << new_value.toString();  // 触发回调函数，输出旧值和新值
     });
 

@@ -4,6 +4,7 @@ namespace sylar {
 
 // 通过名字查找配置项，返回配置项基类指针，返回nullptr表示没有找到
 ConfigVarBase::ptr Config::LookupBase(const std::string& name) {
+    RWMutexType::ReadLock lock(GetMutex());
     auto it = GetDatas().find(name);
     return it == GetDatas().end() ? nullptr : it->second;
 }
@@ -57,6 +58,16 @@ void Config::LoadFromYaml(const YAML::Node& root) {
                 var->fromString(ss.str());
             }
         }
+    }
+}
+
+
+// 遍历配置项集合并对每个配置项执行回调函数
+void Config::Visit(std::function<void(ConfigVarBase::ptr)> cb) {
+    RWMutexType::ReadLock lock(GetMutex());
+    for(auto it = GetDatas().begin();
+        it != GetDatas().end(); ++it) {
+        cb(it->second);
     }
 }
 

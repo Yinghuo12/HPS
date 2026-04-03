@@ -6,7 +6,6 @@
 #include <sstream>
 #include <boost/lexical_cast.hpp>
 #include <yaml-cpp/yaml.h>
-#include "sylar/log.h"
 #include <vector>
 #include <list>
 #include <map>
@@ -14,6 +13,10 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <functional>
+
+#include "thread.h"
+#include "log.h"
+
 
 namespace sylar {
 
@@ -261,6 +264,7 @@ public:
 template<class T, class FromStr = LexicalCast<std::string, T>, class ToStr = LexicalCast<T, std::string> >  // 特化版本，提供默认的类型转换器
 class ConfigVar : public ConfigVarBase {
 public:
+    typedef RWMutex RWMutexType;
     typedef std::shared_ptr<ConfigVar> ptr;
     typedef std::function<void (const T& old_value, const T& new_value)> on_change_cb;  // 配置项变更回调函数类型，参数是旧值和新值
 
@@ -269,6 +273,7 @@ public:
     // 将配置项的值转换为字符串，方便保存到文件中
     std::string toString() override {
         try {
+            RWMutexType::ReadLock lock(m_mutex);
             // return boost::lexical_cast<std::string>(m_val);  // T转换为字符串
             return ToStr()(m_val);   // T类型转换为自定义类型
         } catch (std::exception& e) {
@@ -288,35 +293,60 @@ public:
         return false;
     }
     
-    const T& getValue() const { return m_val; }
+    const T getValue() const {
+        RWMutexType::ReadLock lock(m_mutex);
+        return m_val; 
+    }
     
     void setValue(const T& v) { 
-        // m_val = v;   // 原代码
-        if(v == m_val) {  // 如果新值和旧值相同，则不更新配置项的值，也不调用回调函数
-            return;
+        {
+            // 读
+            RWMutexType::ReadLock lock(m_mutex);
+            if(v == m_val) {  // 如果新值和旧值相同，则不更新配置项的值，也不调用回调函数
+                return;
+            }
+            // 调用配置项变更回调函数
+            for(auto& i : m_cbs) {
+                i.second(m_val, v);  // 传入旧值和新值
+            }
         }
-        // 调用配置项变更回调函数
-        for(auto& i : m_cbs) {
-            i.second(m_val, v);  // 传入旧值和新值
-        }
+        // 写
+        RWMutexType::WriteLock lock(m_mutex);
         m_val = v;    // 最后更新配置项的值
     }
 
     std::string getTypeName() override { return typeid(T).name(); } // 返回配置项的类型名
 
     // 配置项变更回调函数的管理，添加、删除、获取、清空回调函数
-    void addListener(uint64_t key, on_change_cb cb) { m_cbs[key] = cb; }
-    void delListener(uint64_t key) { m_cbs.erase(key); }
+    uint64_t addListener(on_change_cb cb) { 
+        // 标识回调函数id
+        static uint64_t s_fun_id = 0;
+        RWMutexType::WriteLock lock(m_mutex);
+        ++s_fun_id;
+        m_cbs[s_fun_id] = cb;
+        return s_fun_id; 
+    }
+
+    void delListener(uint64_t key) { 
+        RWMutexType::WriteLock lock(m_mutex);
+        m_cbs.erase(key); 
+    }
+
     on_change_cb getListener(uint64_t key) {
+        RWMutexType::ReadLock lock(m_mutex);
         auto it = m_cbs.find(key);
         return it == m_cbs.end() ? nullptr : it->second;
     }
-    void clearListener() { m_cbs.clear(); }
+    void clearListener() {
+        RWMutexType::ReadLock lock(m_mutex);
+        m_cbs.clear(); 
+    }
 
 
 private:
     T m_val;
     std::map<uint64_t, on_change_cb> m_cbs;  // 配置项变更回调函数列表
+    mutable RWMutexType m_mutex;  // 锁要在const成员函数里被修改
 };
 
 
@@ -324,12 +354,15 @@ private:
 class Config {
 public:
     typedef std::map<std::string, ConfigVarBase::ptr> ConfigVarMap;
+    typedef RWMutex RWMutexType;
+
     // 下面实现了两个版本
     // 版本一：配置项查找并创建，返回配置项的智能指针 调用了版本二的重载函数
     template<class T>
     static typename ConfigVar<T>::ptr Lookup(const std::string& name, const T& default_value, const std::string& description = "") {  // 为什么要加typename？因为ConfigVar<T>::ptr是一个依赖于模板参数T的类型，编译器在解析时无法确定它是否是一个类型，所以需要加typename告诉编译器这是一个类型。
         // 1. 查找配置项
         // 优化：检测同名不同类型的配置项，输出错误日志
+        RWMutexType::WriteLock lock(GetMutex());
         auto it = GetDatas().find(name);
         if (it != GetDatas().end()) {
             auto tmp = std::dynamic_pointer_cast<ConfigVar<T> >(it->second);
@@ -363,6 +396,7 @@ public:
     // 版本二：配置项查找，返回nullptr表示没有找到
     template<class T>
     static typename ConfigVar<T>::ptr Lookup(const std::string& name) {
+        RWMutexType::ReadLock lock(GetMutex());
         auto it = GetDatas().find(name);
         if (it == GetDatas().end()) {
             return nullptr;
@@ -374,12 +408,22 @@ public:
     static void LoadFromYaml(const YAML::Node& root);  // 从yaml节点加载配置项
     static ConfigVarBase::ptr LookupBase(const std::string& name);  // 查找配置项基类指针，返回nullptr表示没有找到
 
+    static void Visit(std::function<void(ConfigVarBase::ptr)> cb);   // 遍历配置项，调用回调函数
+
+private:
+
 private:
     // static ConfigVarMap s_datas;  // 存储所有配置项的map，key为配置项名称，value为配置项对象的智能指针
     // 修改bug: 全局变量初始化顺序不确定，项目中大量使用全局配置变量，s_datas可能在还没创建时就去使用它，导致程序崩溃。采用函数内静态变量，第一次调用函数时才初始化
     static ConfigVarMap& GetDatas() {
         static ConfigVarMap s_datas;
         return s_datas;
+    }
+
+    // 用静态函数返回静态锁  如果采用定义全局锁变量的方法 则会 初始化顺序崩溃 （配置表可能在锁初始化之前就被使用）
+    static RWMutexType& GetMutex(){
+        static RWMutexType s_mutex;
+        return s_mutex;
     }
 };
 

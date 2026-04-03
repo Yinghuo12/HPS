@@ -12,6 +12,7 @@
 #include <map>
 #include "singleton.h"
 #include "util.h"
+#include "thread.h"
 
 // 日志宏定义
 #define SYLAR_LOG_LEVEL(logger, level) \
@@ -138,6 +139,7 @@ class LogAppender {
   friend class Logger;
 public:
   typedef std::shared_ptr<LogAppender> ptr;
+  typedef Spinlock MutexType;
   virtual ~LogAppender() {};
 
   virtual void log(std::shared_ptr<Logger> logger, LogLevel::Level level, LogEvent::ptr event) = 0;  // 纯虚函数，子类必须实现
@@ -145,6 +147,7 @@ public:
 
   // 设置获取格式器
   void setFormatter(LogFormatter::ptr formatter){
+    MutexType::Lock lock(m_mutex);
     m_formatter = formatter;
     if(m_formatter){
         m_hasFormatter = true;
@@ -153,7 +156,10 @@ public:
     }
   }
   
-  LogFormatter::ptr getFormatter() const { return m_formatter; }
+  LogFormatter::ptr getFormatter() { 
+    MutexType::Lock lock(m_mutex);
+    return m_formatter; 
+  }
 
   LogLevel::Level getLevel() const { return m_level; }
   void setLevel(LogLevel::Level level) { m_level = level; }
@@ -162,6 +168,7 @@ protected:  // 子类可以访问
   LogLevel::Level m_level = LogLevel::DEBUG;  // 日志级别
   LogFormatter::ptr m_formatter;              // 格式器
   bool m_hasFormatter = false;               // 是否有格式器
+  MutexType m_mutex;
 };
 
 
@@ -170,6 +177,7 @@ class Logger : public std::enable_shared_from_this<Logger> {
   friend class LoggerManager;
 public:
   typedef std::shared_ptr<Logger> ptr;
+  typedef Spinlock MutexType;
 
   Logger(const std::string &name = "root");
   
@@ -198,7 +206,7 @@ public:
   // 获取设置日志格式器
   void setFormatter(LogFormatter::ptr val);
   void setFormatter(const std::string& val);
-  LogFormatter::ptr getFormatter() const;
+  LogFormatter::ptr getFormatter();
   std::string toYamlString();
   
 private:
@@ -207,6 +215,7 @@ private:
   std::list<LogAppender::ptr> m_appenders; // 日志输出地集合
   LogFormatter::ptr m_formatter;           // 日志格式器
   Logger::ptr m_root;                      // 根日志器，默认的日志输出地
+  MutexType m_mutex;
 };
 
 
@@ -232,22 +241,25 @@ public:
 private:
   std::string m_filename; // 文件名
   std::ofstream m_filestream;
+  uint64_t m_lastTime = 0;
 };
 
 
 // 日志管理器，负责管理多个日志器
 class LoggerManager {
 public:
-    LoggerManager();
-    void init();
+  typedef Spinlock MutexType;
+  LoggerManager();
+  void init();
 
-    Logger::ptr getLogger(const std::string& name);
-    Logger::ptr getRoot() const { return m_root; }
+  Logger::ptr getLogger(const std::string& name);
+  Logger::ptr getRoot() const { return m_root; }
 
-    std::string toYamlString();
+  std::string toYamlString();
 private:
-    std::map<std::string, Logger::ptr> m_loggers;
-    Logger::ptr m_root;
+  std::map<std::string, Logger::ptr> m_loggers;
+  Logger::ptr m_root;
+  MutexType m_mutex;
 };
 typedef sylar::Singleton<LoggerManager> LoggerMgr;  // 定义一个LoggerManager的单例，方便全局访问
 
