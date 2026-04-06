@@ -17,7 +17,7 @@
 // 日志宏定义
 #define SYLAR_LOG_LEVEL(logger, level) \
   if(logger->getLevel() <= level) \
-    sylar::LogEventWrap(sylar::LogEvent::ptr(new sylar::LogEvent(logger, level, __FILE__, __LINE__, 0, sylar::GetThreadId(), sylar::GetFiberId(), time(0)))).getSS()
+    sylar::LogEventWrap(sylar::LogEvent::ptr(new sylar::LogEvent(logger, level, __FILE__, __LINE__, 0, sylar::GetThreadId(), sylar::GetFiberId(), time(0), sylar::Thread::GetName()))).getSS()
 
 #define SYLAR_LOG_DEBUG(logger) SYLAR_LOG_LEVEL(logger, sylar::LogLevel::DEBUG)
 #define SYLAR_LOG_INFO(logger)  SYLAR_LOG_LEVEL(logger, sylar::LogLevel::INFO)
@@ -27,7 +27,7 @@
 
 // 格式化日志内容的宏，使用可变参数，支持类似printf的格式化输出
 #define SYLAR_LOG_FMT_LEVEL(logger, level, fmt, ...) \
-    if(logger->getLevel() <= level) sylar::LogEventWrap(sylar::LogEvent::ptr(new sylar::LogEvent(logger, level, __FILE__, __LINE__, 0, sylar::GetThreadId(), sylar::GetFiberId(), time(0)))).getEvent()->format(fmt, __VA_ARGS__)
+    if(logger->getLevel() <= level) sylar::LogEventWrap(sylar::LogEvent::ptr(new sylar::LogEvent(logger, level, __FILE__, __LINE__, 0, sylar::GetThreadId(), sylar::GetFiberId(), time(0), sylar::Thread::GetName()))).getEvent()->format(fmt, __VA_ARGS__)
 
 #define SYLAR_LOG_FMT_DEBUG(logger, fmt, ...) SYLAR_LOG_FMT_LEVEL(logger, sylar::LogLevel::DEBUG, fmt, __VA_ARGS__)
 #define SYLAR_LOG_FMT_INFO(logger, fmt, ...)  SYLAR_LOG_FMT_LEVEL(logger, sylar::LogLevel::INFO, fmt, __VA_ARGS__)
@@ -65,7 +65,7 @@ public:
 class LogEvent {
 public:
   typedef std::shared_ptr<LogEvent> ptr;
-  LogEvent(std::shared_ptr<Logger> logger, LogLevel::Level level, const char* file, int32_t line, uint32_t elapse, uint32_t thread_id, uint32_t fiber_id, uint64_t time);
+  LogEvent(std::shared_ptr<Logger> logger, LogLevel::Level level, const char* file, int32_t line, uint32_t elapse, uint32_t thread_id, uint32_t fiber_id, uint64_t time, const std::string& thread_name = "");
 
   // 获取日志事件信息
   const char *getFile() const { return m_file; }
@@ -74,6 +74,7 @@ public:
   uint32_t getThreadId() const { return m_threadId; }
   uint32_t getFiberId() const { return m_fiberId; }
   uint64_t getTime() const { return m_time; }
+  const std::string& getThreadName() const { return m_threadName; }
   std::string getContent() const { return m_ss.str(); }
   std::shared_ptr<Logger> getLogger() const { return m_logger; }
   LogLevel::Level getLevel() const { return m_level; }
@@ -86,11 +87,12 @@ private:
   // 日志事件包含的信息
   const char *m_file = nullptr; // 文件名
   int32_t m_line = 0;           // 行号
-  uint32_t m_elapse = 0;       // 程序运行时间
+  uint32_t m_elapse = 0;        // 程序运行时间
   uint32_t m_threadId = 0;      // 线程ID
   uint32_t m_fiberId = 0;       // 协程ID
   uint64_t m_time = 0;          // 时间戳
-  std::stringstream m_ss;        // 日志内容流
+  std::string m_threadName;     // 线程名
+  std::stringstream m_ss;       // 日志内容流
 
   std::shared_ptr<Logger> m_logger;  // 日志事件所属的日志器
   LogLevel::Level m_level;              // 日志级别

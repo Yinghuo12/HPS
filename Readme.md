@@ -28,7 +28,7 @@ touch include/boost/.gitkeep
 touch include/yaml-cpp/.gitkeep
 
 ## 普通提交
-git add.
+git add .
 git commit -m "xxx"
 git push -f origin main
 
@@ -40,6 +40,304 @@ git commit -m "xxx"
 git push -f origin main
 ~~~
 
+---
+
+## 协程模块 (Fiber) 与 调度器模块 (Scheduler) (Version 4)
+
+随着框架向纯异步、高性能演进，Version 4 引入了**非对称协程 (Asymmetric Coroutine)** 机制，并实现了 **M:N 协程调度模型**（M 个协程在 N 个线程上动态调度），彻底改变了传统的基于回调的异步编程模式。
+
+### 协程与调度模块核心类图
+
+以下是严格包含所有方法签名、变量、访问修饰符和嵌套结构的 UML 类图：
+
+```mermaid
+classDiagram
+    %% =================全局工具与断言宏=================
+    class sylar_util {
+        <<namespace>>
+        +Backtrace(bt: std::vector~std::string~&, size: int, skip: int): void $
+        +BacktraceToString(size: int, skip: int, prefix: const std::string&): std::string $
+    }
+    
+    class sylar_macro {
+        <<macro>>
+        +SYLAR_ASSERT(x)
+        +SYLAR_ASSERT2(x, w)
+    }
+    
+    %% =================协程状态枚举=================
+    class State {
+        <<enumeration>>
+        INIT
+        HOLD
+        EXEC
+        TERM
+        READY
+        EXCEPT
+    }
+
+    %% =================协程模块 (Fiber)=================
+    class Fiber {
+        <<enable_shared_from_this>>
+        -m_id: uint64_t
+        -m_stacksize: uint32_t
+        -m_state: State
+        -m_ctx: ucontext_t
+        -m_stack: void*
+        -m_cb: std::function~void()~
+        
+        -Fiber()
+        +Fiber(cb: std::function~void()~, stacksize: size_t, use_caller: bool)
+        +~Fiber()
+        +reset(cb: std::function~void()~): void
+        +swapIn(): void
+        +swapOut(): void
+        +call(): void
+        +back(): void
+        +getId(): uint64_t const
+        +getState(): State const
+        
+        +SetThis(f: Fiber*)$
+        +GetThis(): Fiber::ptr$
+        +YieldToReady(): void$
+        +YieldToHold(): void$
+        +TotalFibers(): uint64_t$
+        +MainFunc(): void$
+        +CallerMainFunc(): void$
+        +GetFiberId(): uint64_t$
+    }
+
+    %% =================调度器模块 (Scheduler)=================
+    class Scheduler {
+        #m_threadIds: std::vector~int~
+        #m_threadCount: size_t
+        #m_activeThreadCount: std::atomic~size_t~
+        #m_idleThreadCount: std::atomic~size_t~
+        #m_stopping: bool
+        #m_autoStop: bool
+        #m_rootThread: int
+        -m_mutex: MutexType
+        -m_threads: std::vector~Thread::ptr~
+        -m_fibers: std::list~FiberAndThread~
+        -m_rootFiber: Fiber::ptr
+        -m_name: std::string
+
+        +Scheduler(threads: size_t, use_caller: bool, name: const std::string&)
+        +~Scheduler() virtual
+        +getName(): const std::string& const
+        +GetThis(): Scheduler*$
+        +GetMainFiber(): Fiber*$
+        +start(): void
+        +stop(): void
+        +schedule~FiberOrCb~(fc: FiberOrCb, thread: int): void
+        +schedule~InputIterator~(begin: InputIterator, end: InputIterator): void
+        
+        #tickle(): void virtual
+        #run(): void
+        #stopping(): bool virtual
+        #idle(): void virtual
+        #setThis(): void
+        -scheduleNoLock~FiberOrCb~(fc: FiberOrCb, thread: int): bool
+    }
+
+    class FiberAndThread {
+        <<struct>>
+        +fiber: Fiber::ptr
+        +cb: std::function~void()~
+        +thread: int
+        +FiberAndThread(f: const Fiber::ptr&, thr: int)
+        +FiberAndThread(f: const std::function~void()~&, thr: int)
+        +FiberAndThread(f: Fiber::ptr&&, thr: int)
+        +FiberAndThread(f: std::function~void()~&&, thr: int)
+        +FiberAndThread()
+        +reset(): void
+    }
+
+    %% 关系连线
+    Fiber *-- State : has a
+    Scheduler "1" *-- "n" FiberAndThread : 维护任务队列
+    FiberAndThread "1" o-- "1" Fiber : 包含协程指针
+    Scheduler "1" *-- "n" Thread : 维护线程池
+    Scheduler "1" *-- "1" Fiber : 拥有主协程(use_caller)
+
+```
+
+---
+
+### 断言与工具链 (Macro & Util) 实现细节
+
+为了保障协程框架在复杂上下文切换中的稳定性，引入了系统级调用栈追踪机制：
+* **`Backtrace` 与 `BacktraceToString`**：
+  * 底层调用 Linux/glibc 的 `<execinfo.h>` 库函数 `backtrace()` 抓取当前线程的调用栈指针数组。
+  * 使用 `backtrace_symbols()` 将内存地址翻译为可读的函数名和偏移量字符串。
+* **`SYLAR_ASSERT`**：
+  * 通过宏定义实现严格的运行时检查。当条件不满足时，自动触发 `BacktraceToString` 获取堆栈信息，利用 Log 系统打印 `FATAL` 级错误后调用 `assert` 中止程序，极大提升了疑难 Bug 的排查效率。
+
+---
+
+### 协程模块 (Fiber) 详细实现细节
+
+采用**非对称协程（Asymmetric Coroutines）**设计，子协程只能和创建它的父协程（或线程主协程）进行切换，职责清晰。
+
+#### 核心组件设计
+* **上下文切换 (`ucontext_t`)**：
+  * 利用 `<ucontext.h>` 实现用户态的上下文保存与恢复。
+  * `getcontext()` 保存当前 CPU 寄存器状态；`makecontext()` 绑定协程入口函数（如 `MainFunc`）和预先分配的独立内存栈；`swapcontext()` 实现原子级的“保存当前状态并加载新状态”。
+* **双构造函数架构**：
+  1. **私有无参构造 `Fiber()`**：仅用于将**当前线程的原始执行流**包装成第一个主协程。它不分配独立内存栈，直接接管当前执行流。
+  2. **带参构造 `Fiber(cb, stacksize, use_caller)`**：用于创建真正的业务协程。通过 `MallocStackAllocator` 分配独立栈空间。
+* **状态机设计**：
+  * 维护了严格的状态流转：`INIT` -> `EXEC` -> `HOLD` / `READY` -> `TERM` / `EXCEPT`。
+  * **协程重用 (`reset`)**：当协程处于 `TERM` 或 `INIT` 状态时，为了避免频繁的 `malloc/free` 栈内存带来的性能开销，允许直接传入新的回调函数 `cb`，重新调用 `makecontext` 复用已有的栈空间。
+* **精妙的内存泄漏规避 (引用计数难题)**：
+  * 在 `MainFunc` 协程入口函数中，业务执行完毕后协程需要切换回主协程。
+  * **难点**：在 `MainFunc` 的栈中存在一个局部的 `Fiber::ptr cur = GetThis();`。如果在 `cur->swapOut()` 时直接切走，这个局部智能指针将永远无法析构（因为执行流再也不会回到这里），导致引用计数永远为 1，栈内存泄漏。
+  * **破局方案**：提取裸指针 `auto raw_ptr = cur.get();`，显式调用 `cur.reset();` 将智能指针引用计数归零，最后通过 `raw_ptr->swapOut();` 安全切出。
+
+---
+
+### 调度器模块 (Scheduler) 详细实现细节
+
+调度器实现了 **M:N 协程调度**，将 N 个协程任务均匀地分配给 M 个物理线程池执行。
+
+#### 核心组件设计
+* **`use_caller` (借用调用线程) 机制**：
+  * 创建调度器时，如果 `use_caller` 为 `true`，调度器会将**创建调度器的那个主线程**也纳入线程池中（而不是纯粹只在后台新开线程）。
+  * 为实现这点，调度器给主线程分配了一个特殊的 `m_rootFiber`。这个协程的入口是 `Scheduler::run`，但通过 `call()/back()` 机制与主线程的原始执行流进行切换，设计极其巧妙。
+* **`FiberAndThread` (任务包装器)**：
+  * 支持接收 `Fiber::ptr` 协程对象，或者原始的 `std::function<void()>` 回调。
+  * 实现了**右值引用 (Rvalue Reference)** 的构造函数，支持 `std::move` 窃取资源，避免了将任务投入队列时产生不必要的拷贝开销。
+  * 支持指定执行线程 `thread`（如果为 -1 则由任意线程抢占）。
+* **核心调度循环 (`run()`)**：
+  调度线程的核心就是一个 `while(true)` 死循环，内部逻辑如下：
+  1. 加锁，从 `m_fibers` 队列中取出一个可执行的任务（匹配当前线程 ID 的，或未指定线程 ID 的）。
+  2. 如果取到任务：
+     * 若任务是协程对象：直接 `swapIn()` 切换过去执行。
+     * 若任务是回调函数：为其分配一个协程对象，然后 `swapIn()`。
+  3. 当协程 `Yield` 放弃 CPU 后（返回到 `run()`）：检查协程状态。如果是 `READY`，则重新放回任务队列尾部；如果是其他状态则保持 `HOLD` 挂起，等待其他地方唤醒。
+  4. 如果队列中没有任务：线程切入 `idle()` 空闲协程，默认实现为不断地 `YieldToHold`（后续将在定时器和 IO 调度器中使用 `epoll_wait` 挂起，实现真正的睡眠休眠，降低 CPU 空转率）。
+* **优雅退出机制 (`stop()`)**：
+  * 置位 `m_autoStop` 标志，并向所有后台线程发送 `tickle()` 唤醒信号。
+  * 如果启用了 `use_caller`，主线程会在这里陷入 `m_rootFiber->call()`，亲自动手帮忙处理剩下的任务，直到所有协程状态归位，最后逐一 `join()` 回收所有线程，实现无内存泄漏的优雅退出。
+
+---
+
+### 测试用例说明 (Tests)
+
+* **`test_assert.cc`**：
+  * 模拟异常条件，触发 `SYLAR_ASSERT2`。
+  * 控制台将自动打印类似 `[FATAL] ASSERTION: 0 == 1 ... backtrace: ...` 的多级函数调用栈，验证了追踪系统的稳定性。
+* **`test_fiber.cc`**：
+  * 演示了最原始的单线程协程用法。
+  * 主执行流通过 `swapIn()` 切入 `run_in_fiber`，子协程打印后通过 `YieldToHold()` 交还控制权，往复穿插执行。证明了协程在不涉及多线程条件下的状态保存能力。
+* **`test_scheduler.cc`**：
+  * 实例化 `sylar::Scheduler`（参数：3个工作线程，不使用调用者线程）。
+  * 通过 `scheduler.schedule(&test_fiber)` 将回调任务投入调度池。
+  * 在被调度的协程函数内部，利用静态变量 `s_count` 实现递归自我调度（倒数 5 次）。
+  * 日志将清晰展示：同一个协程任务，在其挂起后被重新调度时，可能会在不同的底层 `thread_id` 上被执行，完美验证了 M:N 调度器的跨线程工作能力。
+
+---
+
+## 核心解读：协程 (Fiber) 模块深度剖析笔记 (Version 4)
+
+本章节将深入剖析 `sylar` 框架的基石——协程模块。不同于简单的功能罗列，本章旨在揭示其**设计哲学、底层技术原理、关键实现细节以及针对复杂问题的解决方案**。
+
+### 设计哲学：为何选择并如何实现协程
+
+传统的网络编程模型（如多线程、异步回调）存在固有弊端：
+*   **多线程模型**：线程是内核级资源，创建和上下文切换开销巨大。当并发量达到数万甚至更高时，系统资源消耗和调度开销将成为瓶颈。
+*   **异步回调模型**：虽然性能高，但会导致“回调地狱 (Callback Hell)”，业务逻辑被拆分得支离破碎，代码可读性和可维护性极差。
+
+`sylar` 框架的协程机制旨在结合两者的优点，规避其缺点，实现：
+1.  **用户态调度**：协程是用户态的“轻量级线程”，创建和切换成本极低（仅涉及寄存器和栈指针的交换），可以轻松创建数百万个。
+2.  **同步风格的异步编程**：允许开发者用看似同步的、顺序执行的代码，来编写本质上是异步的、非阻塞的逻辑。
+
+本项目实现的是**非对称协程 (Asymmetric Coroutines)**，即协程的控制权只能在子协程和其调用者（通常是调度器主协程）之间转移，这使得调度关系清晰、易于管理。
+
+---
+
+### 底层基石：`ucontext.h` 与上下文切换原理
+
+本协程库的核心是 POSIX 提供的 `ucontext.h` API，它允许程序在用户态保存和恢复完整的执行上下文。
+
+*   **`ucontext_t` 结构体**：这是一个黑盒结构体，但其内部关键性地存储了：
+    *   **CPU 寄存器**：包括指令指针 `rip`、栈顶指针 `rsp`、栈基址指针 `rbp` 以及所有通用寄存器。
+    *   **`uc_stack`**：指向为该上下文分配的独立内存栈。
+    *   **`uc_link`**：一个指向后继上下文的指针，当本上下文的入口函数执行完毕后，会自动切换到 `uc_link` 指向的上下文。
+*   **核心函数三元组**：
+    1.  **`getcontext(&ctx)`**：**“快照”**。将当前执行点的所有寄存器状态保存到 `ctx` 结构体中。
+    2.  **`makecontext(&ctx, func, ...)`**：**“改装”**。修改一个已保存的 `ctx`，将其指令指针 `rip` 指向一个新的函数 `func`，并为其关联一个新分配的栈。**注意：它只能修改通过 `getcontext` 获取的上下文**。
+    3.  **`swapcontext(&old_ctx, &new_ctx)`**：**“切换”**。这是原子操作，它将当前上下文保存到 `old_ctx`，然后立即从 `new_ctx` 中恢复上下文。这是协程 `Yield` 和 `Resume` 的直接实现。
+
+---
+
+### 全局与线程局部(TLS)状态：协程的“神经系统”
+
+为了在不传递指针的情况下让代码感知当前所在的协程，框架巧妙地使用了全局和线程局部存储变量(TLS)：
+
+*   **`static std::atomic<uint64_t> s_fiber_id / s_fiber_count`**：
+    *   **原子性**：使用 `std::atomic` 是因为调度器可能在多个线程中创建协程，保证了 ID 分配和计数的线程安全。
+*   **`static thread_local Fiber* t_fiber`**：
+    *   **核心中的核心**。这是一个线程局部变量，它永远指向**当前线程上正在执行的那个协程**。`Fiber::GetThis()` 的高效实现完全依赖于此。
+*   **`static thread_local Fiber::ptr t_threadFiber`**：
+    *   **“锚点”**。它指向每个线程的**主协程**（即代表原始线程执行流的那个协程）。当一个子协程需要将控制权交还给“线程本身”而不是调度器时（例如 `back()` 操作），`t_threadFiber` 就是回归的目标。
+
+---
+
+### 内存管理：协程栈的创建与复用
+
+*   **独立栈空间**：每个子协程都拥有独立的栈内存，通过 `MallocStackAllocator` (本质是 `malloc`) 分配。栈的大小由配置项 `fiber.stack_size` 决定，实现了灵活性。
+*   **主协程的特殊性**：`Fiber::GetThis()` 在一个新线程上首次被调用时，会创建一个特殊的“主协程”。这个协程**不分配新栈**，而是直接“接管”当前线程的调用栈。这是协程系统启动的“第一推动力”。
+*   **`reset(cb)` - 性能优化的关键**：
+    *   **问题**：如果每次任务都 `new Fiber(...)`，在高并发下频繁 `malloc/free` 大块栈内存（通常是 1MB 或 2MB）会导致严重的性能抖动和内存碎片。
+    *   **解决方案**：当一个协程执行完毕（状态变为 `TERM` 或 `EXCEPT`），调度器不会立即销毁它。而是通过 `reset(cb)` 方法，传入一个新的任务函数 `cb`，并重新调用 `makecontext` 来**复用这块已经分配好的栈内存**，实现了协程对象的池化，是高性能设计的体现。
+
+---
+
+### 方法剖析：解读关键函数的内部逻辑
+
+#### `Fiber::GetThis()` - 智能的引导程序
+此静态方法是用户与协程交互的主要入口之一，其内部逻辑极为精妙：
+1.  检查 `t_fiber` (当前线程的当前协程)。
+2.  若 `t_fiber` 非空，直接返回其 `shared_from_this()`。
+3.  若 `t_fiber` 为空（**代表这是此线程第一次调用该函数**）：
+    a.  创建一个新的协程实例 `main_fiber`，但调用的是**私有的无参构造函数 `Fiber()`**。
+    b.  在此私有构造函数内，状态被置为 `EXEC`，并调用 `SetThis(this)` 将 `t_fiber` 指向自己。
+    c.  `main_fiber` 不会分配新栈，它代表的就是当前线程的执行流。
+    d.  将这个 `main_fiber` 赋值给 `t_threadFiber`，作为本线程的“锚点”。
+    e.  断言 `t_fiber == main_fiber.get()` 确保初始化成功。
+    f.  返回 `main_fiber`。
+
+#### `swapIn()` vs `swapOut()` 与 `call()` vs `back()`
+*   `swapIn()` / `swapOut()`：**为调度器服务**。`swapIn()` 是从调度器的主循环协程切换到业务协程；`swapOut()` 是从业务协程切回调度器的主循环协程。切换目标是固定的 `Scheduler::GetMainFiber()`。
+*   `call()` / `back()`：**为非调度器场景服务**。例如在 `use_caller` 模式下，主线程的原始执行流需要和某个协程切换。`call()` 从主线程协程切入子协程，`back()` 从子协程切回主线程协程。切换目标是 `t_threadFiber`。
+
+#### `MainFunc()` - 规避 `shared_ptr` 引用计数陷阱
+这是整个协程模块**最精巧、最关键**的设计之一，完美解决了C++协程库中一个经典的内存泄漏问题。
+*   **问题场景**：
+    ```cpp
+    void Fiber::MainFunc() {
+        Fiber::ptr cur = GetThis(); // cur的引用计数至少为1
+        // ... 执行业务代码 cur->m_cb() ...
+        cur->swapOut(); // <--- 问题点！
+        // 此后的代码永远不会被执行
+    }
+    ```
+    当 `cur->swapOut()` 执行后，CPU 的执行流已经跳转到了调度器协程，`MainFunc` 的栈帧被“冻结”。`cur` 这个栈上的 `shared_ptr` 对象永远没有机会被析构，导致它持有的引用计数永远无法释放，最终整个 `Fiber` 对象（包括其百万字节的栈）**永久泄漏**。
+
+*   **sylar 的解决方案**：
+    ```cpp
+    void Fiber::MainFunc() {
+        // ... try-catch ...
+        
+        auto raw_ptr = cur.get();  // 1. 获取裸指针，不增加引用计数
+        cur.reset();               // 2. 强制析构栈上的智能指针，引用计数-1
+        raw_ptr->swapOut();        // 3. 使用裸指针进行上下文切换
+    
+        SYLAR_ASSERT2(false, "never reach here");
+    }
+    ```
+    通过在切换前手动 `reset()` 智能指针，解除了当前栈帧对协程对象的引用，将生命周期管理完全交给了外部（如调度器的任务队列）。这是保障协程资源被正确回收的核心所在。
 
 ---
 ## 线程模块 (Thread System) 与并发安全设计 (Version 3)

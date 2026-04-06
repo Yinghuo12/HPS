@@ -129,6 +129,14 @@ public:
     }
 };
 
+class ThreadNameFormatItem : public LogFormatter::FormatItem {
+public:
+    ThreadNameFormatItem(const std::string& str = "") {}
+    void format(std::ostream& os, Logger::ptr logger, LogLevel::Level level, LogEvent::ptr event) override {
+        os << event->getThreadName();
+    }
+};
+
 class DateTimeFormatItem : public LogFormatter::FormatItem {
 public:
     DateTimeFormatItem(const std::string& format = "%Y-%m-%d %H:%M:%S")
@@ -202,13 +210,14 @@ private:
 // uint64_t m_time = 0;          // 时间戳
 // std::string m_content;        // 日志内容流
 
-LogEvent::LogEvent(std::shared_ptr<Logger> logger, LogLevel::Level level, const char* file, int32_t line, uint32_t elapse, uint32_t thread_id, uint32_t fiber_id, uint64_t time)
+LogEvent::LogEvent(std::shared_ptr<Logger> logger, LogLevel::Level level, const char* file, int32_t line, uint32_t elapse, uint32_t thread_id, uint32_t fiber_id, uint64_t time, const std::string& thread_name)
     :m_file(file)
     ,m_line(line)
     ,m_elapse(elapse)
     ,m_threadId(thread_id)
     ,m_fiberId(fiber_id)
     ,m_time(time)
+    ,m_threadName(thread_name)
     ,m_logger(logger)
     ,m_level(level) {
 
@@ -218,7 +227,7 @@ LogEvent::LogEvent(std::shared_ptr<Logger> logger, LogLevel::Level level, const 
 Logger::Logger(const std::string &name) : m_name(name), m_level(LogLevel::DEBUG){ // 默认最低级别，可以打印所有日志 
     // 默认日志格式, %d:时间 (%Y-%m-%d %H:%M:%S) %T:Tab %t:线程id %F:协程id %N:线程名称 %p:日志级别 %c:日志名称 %f:文件名 %l:行号 %m:日志内容 %n:换行
     // 形式如下：2024-06-01 12:00:00    12345   67890   [DEBUG] [root] test.cpp:10    Hello World
-    m_formatter.reset(new LogFormatter("%d{%Y-%m-%d %H:%M:%S}%T%t%T%F%T[%p]%T[%c]%T%f:%l%T%m%n"));
+    m_formatter.reset(new LogFormatter("%d{%Y-%m-%d %H:%M:%S}%T%t%T%N%T%F%T[%p]%T[%c]%T%f:%l%T%m%n"));
 }
 
 void Logger::setFormatter(LogFormatter::ptr val){
@@ -508,7 +517,7 @@ void LogFormatter::init(){
     XX(l, LineFormatItem),              //l:行号
     XX(T, TabFormatItem),               //T:Tab
     XX(F, FiberIdFormatItem),           //F:协程id
-    // XX(N, ThreadNameFormatItem),        //N:线程名称
+    XX(N, ThreadNameFormatItem),        //N:线程名称
 #undef XX
     };
 
