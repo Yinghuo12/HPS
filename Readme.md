@@ -42,6 +42,201 @@ git push -f origin main
 
 ---
 
+## 9. IO 协程调度器 (IOManager) 与 定时器 (Timer) (Version 5)
+
+纯粹的协程调度器 (`Scheduler`) 只能解决 CPU 密集型任务的切换，但服务端开发面临的最大瓶颈是 **网络 IO 的阻塞**。
+Version 5 通过引入 `epoll` 和 `pipe` 管道机制，将异步 IO、定时器与协程调度器完美融合，实现了一个真正的 **高性能 Reactor 协程模型**。当网络数据未就绪时，协程挂起并让出 CPU；当 `epoll` 检测到数据就绪时，自动唤醒对应的协程继续执行。
+
+### 9.1 IO与定时器模块核心类图
+
+以下是严格包含所有结构体、枚举、方法签名、成员变量的详尽 UML 类图：
+
+```mermaid
+classDiagram
+    %% =================工具函数补充=================
+    class sylar_util {
+        <<namespace>>
+        +GetCurrentMS(): uint64_t $
+        +GetCurrentUS(): uint64_t $
+    }
+
+    %% =================定时器模块 (Timer)=================
+    class Comparator {
+        <<struct>>
+        +operator()(lhs: const Timer::ptr&, rhs: const Timer::ptr&): bool const
+    }
+
+    class Timer {
+        <<enable_shared_from_this>>
+        -m_recurring: bool
+        -m_ms: uint64_t
+        -m_next: uint64_t
+        -m_cb: std::function~void()~
+        -m_manager: TimerManager*
+        
+        -Timer(ms: uint64_t, cb: std::function~void()~, recurring: bool, manager: TimerManager*)
+        -Timer(next: uint64_t)
+        +cancel(): bool
+        +refresh(): bool
+        +reset(ms: uint64_t, from_now: bool): bool
+    }
+
+    class TimerManager {
+        -m_mutex: RWMutexType
+        -m_timers: std::set~Timer::ptr, Comparator~
+        -m_tickled: bool
+        -m_previouseTime: uint64_t
+        
+        +TimerManager()
+        +~TimerManager() virtual
+        +addTimer(ms: uint64_t, cb: std::function~void()~, recurring: bool): Timer::ptr
+        +addConditionTimer(ms: uint64_t, cb: std::function~void()~, weak_cond: std::weak_ptr~void~, recurring: bool): Timer::ptr
+        +getNextTimer(): uint64_t
+        +listExpiredCb(cbs: std::vector~std::function<void()>~&): void
+        +hasTimer(): bool
+        
+        #onTimerInsertedAtFront(): void *
+        #addTimer(val: Timer::ptr, lock: RWMutexType::WriteLock&): void
+        -detectClockRollover(now_ms: uint64_t): bool
+    }
+
+    %% =================IO调度器模块 (IOManager)=================
+    class Event {
+        <<enumeration>>
+        NONE = 0x0
+        READ = 0x1
+        WRITE = 0x4
+    }
+
+    class EventContext {
+        <<struct>>
+        +scheduler: Scheduler*
+        +fiber: Fiber::ptr
+        +cb: std::function~void()~
+    }
+
+    class FdContext {
+        <<struct>>
+        +read: EventContext
+        +write: EventContext
+        +fd: int
+        +events: Event
+        +mutex: MutexType
+        
+        +getContext(event: Event): EventContext&
+        +resetContext(ctx: EventContext&): void
+        +triggerEvent(event: Event): void
+    }
+
+    class IOManager {
+        -m_epfd: int
+        -m_tickleFds: int[2]
+        -m_mutex: RWMutexType
+        -m_pendingEventCount: std::atomic~size_t~
+        -m_fdContexts: std::vector~FdContext*~
+
+        +IOManager(threads: size_t, use_caller: bool, name: const std::string&)
+        +~IOManager()
+        +addEvent(fd: int, event: Event, cb: std::function~void()~): int
+        +delEvent(fd: int, event: Event): bool
+        +cancelEvent(fd: int, event: Event): bool
+        +cancelAll(fd: int): bool
+        +GetThis(): IOManager* $
+        +GetInstance(): IOManager* $
+        +contextResize(size: size_t): void
+        +stopping(timeout: uint64_t&): bool
+        
+        #tickle(): void override
+        #stopping(): bool override
+        #idle(): void override
+        #onTimerInsertedAtFront(): void override
+    }
+
+    %% 关系连线
+    TimerManager "1" *-- "n" Timer : 维护基于红黑树的定时器集合
+    Timer ..> Comparator : 使用比较器进行排序
+    IOManager --|> Scheduler : 继承核心调度能力
+    IOManager --|> TimerManager : 继承定时器管理能力
+    IOManager "1" *-- "n" FdContext : 维护文件描述符上下文
+    FdContext "1" *-- "2" EventContext : 维护读/写独立的回调或协程
+    FdContext ..> Event : 依赖枚举类型
+```
+
+---
+
+### 9.2 定时器模块 (Timer) 实现深度剖析
+
+定时器模块不依赖单独的线程循环，而是极其巧妙地融入到了 `IOManager` 的 `epoll_wait` 阻塞超时机制中。
+
+#### 1. 数据结构的选择：红黑树 (`std::set`)
+* **痛点**：高并发服务器中随时可能有成千上万个定时任务（如超时剔除、心跳检测），我们需要一种能**极其快速地找出最近一个要过期的定时器**的数据结构。
+* **实现方案**：使用了 `std::set<Timer::ptr, Timer::Comparator>`。`std::set` 底层是红黑树，始终保持有序。
+* **精妙的 `Comparator`**：比较器首先按照定时器的**绝对到期时间 (`m_next`)** 升序排列。最巧妙的是，如果两个定时器恰好在同一毫秒到期，比较器会回退到比较**内存地址 (`lhs.get() < rhs.get()`)**。这严格保证了 `set` 认为它们是两个不同的对象，避免了相同时间的定时器被非法覆盖剔除。
+
+#### 2. 定时器核心机制
+* **获取最近超时时间 (`getNextTimer`)**：O(1) 复杂度。由于红黑树有序，只需要取 `m_timers.begin()` 的时间戳减去当前时间，这就是 `epoll_wait` 下一次应该睡眠的时间。
+* **获取已超时的任务 (`listExpiredCb`)**：
+  * 当 `epoll_wait` 醒来时，调用此方法。
+  * **设计亮点**：创建一个临时的“当前时间” dummy Timer 对象，利用 `std::set::lower_bound` 极其高效地进行二分查找，一刀将整棵红黑树切开：前面的全都是超时的，直接批量切割并提取 `cb` 回调函数塞入调度器，后面的继续保留。
+
+#### 3. 解决服务器时间跳变 (Clock Rollover)
+* 服务器运维时可能会遇到 NTP 时间同步或手动修改系统时间的情况。如果时间被强行往回调了一个月，基于绝对时间的定时器将全部失效卡死。
+* **解决方案 (`detectClockRollover`)**：每次检查定时器时，对比上一次记录的时间。如果发现当前系统时间比上一次记录的时间**倒退了超过 1 小时**，则认为发生了时间重置。此时会无视到期时间，强行触发全部当前已有的定时器，防止死锁。
+
+#### 4. 条件定时器 (`addConditionTimer`)
+* 解决异步回调中对象生命周期的终极痛点：定时器触发时，对应的业务对象可能已经被销毁。
+* **实现原理**：通过封装 `std::weak_ptr`。在真正执行 `cb` 之前，调用 `weak_cond.lock()` 尝试提升为强指针 `shared_ptr`。如果提升失败，说明对象已死，直接丢弃该任务；如果提升成功，说明对象依然存活，正常执行业务。
+
+---
+
+### 9.3 IO协程调度器 (IOManager) 实现深度剖析
+
+`IOManager` 是继承自 `Scheduler` 和 `TimerManager` 的集大成者，也是 `sylar` 框架进行网络编程的心脏。
+
+#### 1. Reactor 架构的协程化改造
+* **基础骨架**：初始化时创建了 `m_epfd`（epoll 句柄）和一对 `pipe` 管道（`m_tickleFds`）。
+* **FdContext (句柄上下文)**：
+  * 框架维护了一个一维数组 `m_fdContexts`，索引就是文件描述符 `fd`。这比使用 `map` 查询速度快几十倍，是典型的空间换时间。
+  * 每个 `fd` 挂载两个 `EventContext`：分别对应读(`READ`)和写(`WRITE`)。里面保存着等待这个事件的 `Scheduler` 和被挂起的 `Fiber` 或 `Callback`。
+
+#### 2. 最核心的方法：被重写的 `idle()`
+* 父类 `Scheduler` 在没有任务时会不断让出 CPU，这会导致空转。`IOManager` 重写了 `idle()`，它是 `IOManager` 真正工作的核心循环：
+* **运作流程**：
+  1. 调用 `stopping(next_timeout)` 判断是否要停止，并顺便获取**离现在最近的一个定时器的超时时间**。
+  2. 调用 `epoll_wait(m_epfd, events, 64, next_timeout)` 进入休眠。线程在这里挂起，不会消耗任何 CPU。
+  3. **唤醒契机**有三个：① 定时器到期了；② 监听的网络 `fd` 来了数据；③ 有人往调度器里添加了新任务，调用了 `tickle()` 往管道 `m_tickleFds[1]` 里写了一个字节 `"T"`。
+  4. 醒来后，先调用 `listExpiredCb` 将到期的定时器任务全部加入调度队列。
+  5. 然后遍历 `epoll` 触发的事件列表：
+     * 如果是管道读端可读，说明是 `tickle` 唤醒信号，采用 **ET (边缘触发) 模式** 利用 `while(read(...))` 将管道内积压的唤醒字节一次性全部抽干。
+     * 如果是业务 `fd` 触发了可读或可写，则从 `FdContext` 中摘下对应被挂起的 `Fiber` 或 `Callback`。
+     * 调用 `triggerEvent()` 强行将其塞入调度器的任务队列。
+  6. **精妙的收尾**：`idle` 协程完成一轮事件分发后，立刻显式 `Yield` 切出。此时主调度 `run()` 函数会接管 CPU，开始飞速执行刚才被塞入队列的定时器任务和 IO 业务协程任务。
+
+#### 3. 事件控制：`addEvent` vs `delEvent` vs `cancelEvent`
+* **`addEvent`**：向 `epoll` 注册监听，并绑定当前正在执行的协程。随后用户代码就可以安心地去 `YieldToHold` 休眠了。
+* **`delEvent`**：纯粹从 `epoll` 中删除监听。如果该事件关联的协程还在休眠，**它将永远不会被唤醒**（产生死协程）。
+* **`cancelEvent`**：从 `epoll` 中删除监听，**同时强制触发一次回调/协程恢复**。这在实际业务中极其重要，例如在关闭 Socket 前，必须强制唤醒因等待读取而挂起的协程，让它执行收尾并正常退出，否则会造成严重的内存泄漏。
+
+---
+
+### 9.4 测试用例核心说明 (Tests)
+
+#### `test_iomanager.cc`
+* 揭示了在协程下发起非阻塞 TCP 连接的标准范式。
+* **代码流转图**：
+  1. 将 Socket 设置为非阻塞 (`O_NONBLOCK`)。
+  2. 调用 `connect`，此时必定返回 `EINPROGRESS` (正在连接中)。
+  3. 通过 `addEvent` 向 `IOManager` 注册 `WRITE` 可写事件监听。
+  4. **重点注意**：在真实业务中，此时协程应调用 `YieldToHold()` 挂起自己。
+  5. 当 TCP 三次握手成功（内核层面完成），该 socket 变为可写，`IOManager` 的 `idle` 会从 `epoll_wait` 醒来。
+  6. `IOManager` 摘下挂起的任务投入队列，业务协程恢复执行，得知连接已建立。
+  7. **避坑指南**：在执行 `close(sock)` 之前，务必调用 `cancelEvent` 注销尚未触发的事件，防止内核态句柄状态与用户态对象状态脱节。
+
+#### `test_timer.cc`
+* 演示了循环定时器的用法以及 **智能指针引发的深层悬空陷阱**。
+* **避坑指南**：如果业务逻辑写在 lambda 表达式中，并且该 lambda 作为回调传给了脱离当前生命周期的后台定时器：
+  * **绝不可按引用捕获** (`[&]`) 局部变量智能指针（如 `s_timer`）。因为触发时外层函数早已结束，局部指针已销毁，访问必报 `Segmentation fault`。
+  * **正解**：将需要跨周期管理的智能指针提升为全局/类成员变量（如代码中提取为外部的 `s_timer`），确保其生命周期大于定时器的运行周期。
 ## 协程模块 (Fiber) 与 调度器模块 (Scheduler) (Version 4)
 
 随着框架向纯异步、高性能演进，Version 4 引入了**非对称协程 (Asymmetric Coroutine)** 机制，并实现了 **M:N 协程调度模型**（M 个协程在 N 个线程上动态调度），彻底改变了传统的基于回调的异步编程模式。

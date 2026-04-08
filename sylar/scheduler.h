@@ -46,7 +46,8 @@ public:
         {
             MutexType::Lock lock(m_mutex);
             while(begin != end) {
-                need_tickle = scheduleNoLock(&*begin) || need_tickle;
+                need_tickle = scheduleNoLock(&*begin, -1) || need_tickle;
+                ++begin;
             }
         }
         if(need_tickle) {
@@ -62,6 +63,7 @@ protected:
     virtual void idle();        // 空闲时执行
 
     void setThis();
+    bool hasIdleThreads() { return m_idleThreadCount > 0; }
 
 
 private:
@@ -83,13 +85,10 @@ private:
         std::function<void()> cb;    // 回调函数
         int thread;                  // 线程id
 
-        // 1. 针对左值（拷贝，保留原对象）
-        FiberAndThread(const Fiber::ptr& f, int thr) : fiber(f), thread(thr) {}
-        FiberAndThread(const std::function<void()>& f, int thr) : cb(f), thread(thr) {}
-
-        // 2. 针对右值（移动，窃取资源，推荐！）
-        FiberAndThread(Fiber::ptr&& f, int thr) : fiber(std::move(f)), thread(thr) {}
-        FiberAndThread(std::function<void()>&& f, int thr) : cb(std::move(f)), thread(thr) {}
+        FiberAndThread(Fiber::ptr f, int thr) :fiber(f), thread(thr) { }
+        FiberAndThread(Fiber::ptr* f, int thr) :thread(thr) { fiber.swap(*f); }
+        FiberAndThread(std::function<void()> f, int thr) :cb(f), thread(thr) { }
+        FiberAndThread(std::function<void()>* f, int thr) :thread(thr) { cb.swap(*f); }
         FiberAndThread() :thread(-1) { }
 
         void reset() {
