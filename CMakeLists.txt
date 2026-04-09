@@ -27,6 +27,8 @@ set(LIB_SRC
     sylar/scheduler.cc
     sylar/iomanager.cc
     sylar/timer.cc
+    sylar/hook.cc
+    sylar/fd_manager.cc
 )
 
 
@@ -46,6 +48,8 @@ add_executable(test_fiber tests/test_fiber.cc)
 add_executable(test_scheduler tests/test_scheduler.cc)
 add_executable(test_iomanager tests/test_iomanager.cc)
 add_executable(test_timer tests/test_timer.cc)
+add_executable(test_hook tests/test_hook.cc)
+
 
 # 链接库
 force_redefine_file_macro_for_sources(test) #__FILE__
@@ -71,6 +75,10 @@ target_link_libraries(test_iomanager sylar -lyaml-cpp)
 
 force_redefine_file_macro_for_sources(test_timer) #__FILE__
 target_link_libraries(test_timer sylar -lyaml-cpp)
+
+force_redefine_file_macro_for_sources(test_hook) #__FILE__
+target_link_libraries(test_hook sylar -lyaml-cpp)
+
 
 # 输出路径
 SET(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)

@@ -39,15 +39,200 @@ git add .
 git commit -m "xxx"
 git push -f origin main
 ~~~
+---
+
+
+## IO_Hook (系统调用劫持) 与 句柄管理 (FdManager) (Version 6)
+
+### 版本差异与核心演进亮点
+
+在上一个版本 (Version 5) 中，我们虽然实现了 `IOManager` 协程调度器，但业务代码依然面临一个**致命缺陷**：如果协程中调用了标准的 `read()`、`write()` 或 `sleep()` 等阻塞型系统 API，**整个底层物理线程将被操作系统挂起阻塞**。这导致该线程上的其他所有协程都无法被调度，协程的高并发优势荡然无存。
+
+**Version 6 完美解决了这个问题，核心升级如下：**
+1.  **动态链接库劫持 (IO Hook)**：利用 `dlsym` 劫持了 Glibc 的底层 Socket I/O 及睡眠相关的系统调用。让开发者**可以按照完全同步的思维写代码**，但在底层，框架会自动将阻塞调用转换为“非阻塞 I/O + `epoll` 监听 + 协程 `Yield` 挂起”。这是现代 C++ 协程库（如微信 libco、Sylar）的终极黑魔法。
+2.  **句柄上下文管理 (FdManager)**：统一接管全站的文件描述符 (FD) 状态，记录其是否是非阻塞、是否是 Socket、以及单独的读写超时时间。
+3.  **内存与拷贝控制规范 (`Noncopyable`)**：系统中的锁对象（如 `Mutex`、`Spinlock` 等）绝对不能被拷贝，否则会导致不可预期的死锁或崩溃。本版本剥离出了面向对象设计中经典的 `Noncopyable` 基类，大幅度净化了所有锁模块的基础代码。
 
 ---
 
-## 9. IO 协程调度器 (IOManager) 与 定时器 (Timer) (Version 5)
+### 模块全量核心类图 (UML)
+
+以下是严格包含所有模块、枚举、方法签名、成员变量以及 Extern C 接口的详尽 UML 类图：
+
+```mermaid
+classDiagram
+    %% =================基础规范模块=================
+    class Noncopyable {
+        <<class>>
+        +Noncopyable() default
+        +~Noncopyable() default
+        -Noncopyable(const Noncopyable&) : deleted
+        -operator=(const Noncopyable&) : deleted
+    }
+
+    %% 各类锁及信号量全部继承自 Noncopyable
+    class Semaphore
+    class Mutex
+    class RWMutex
+    class NullMutex
+    class NullRWMutex
+    class Spinlock
+    class CASLock
+    Noncopyable <|-- Semaphore
+    Noncopyable <|-- Mutex
+    Noncopyable <|-- RWMutex
+    Noncopyable <|-- NullMutex
+    Noncopyable <|-- NullRWMutex
+    Noncopyable <|-- Spinlock
+    Noncopyable <|-- CASLock
+
+    %% =================句柄管理模块 (FdManager)=================
+    class FdCtx {
+        <<enable_shared_from_this>>
+        -m_isInit: bool : 1
+        -m_isSocket: bool : 1
+        -m_sysNonblock: bool : 1
+        -m_userNonblock: bool : 1
+        -m_isClosed: bool : 1
+        -m_fd: int
+        -m_recvTimeout: uint64_t
+        -m_sendTimeout: uint64_t
+
+        +FdCtx(fd: int)
+        +~FdCtx()
+        +init(): bool
+        +isInit(): bool const
+        +isSocket(): bool const
+        +isClose(): bool const
+        +close(): bool
+        +setUserNonblock(v: bool): void
+        +getUserNonblock(): bool const
+        +setSysNonblock(v: bool): void
+        +getSysNonblock(): bool const
+        +setTimeout(type: int, v: uint64_t): void
+        +getTimeout(type: int): uint64_t
+    }
+
+    class FdManager {
+        -m_mutex: RWMutexType
+        -m_datas: std::vector~FdCtx::ptr~
+        
+        +FdManager()
+        +get(fd: int, auto_create: bool): FdCtx::ptr
+        +del(fd: int): void
+    }
+
+    %% =================系统调用劫持模块 (Hook)=================
+    class sylar_hook {
+        <<namespace>>
+        +is_hook_enable(): bool $
+        +set_hook_enable(flag: bool): void $
+        +hook_init(): void $
+    }
+
+    class _HookIniter {
+        <<struct>>
+        +_HookIniter()
+    }
+    
+    class timer_info {
+        <<struct>>
+        +cancelled: int = 0
+    }
+
+    class Extern_C_Syscalls {
+        <<C API Intercept>>
+        +sleep(seconds: unsigned int): unsigned int
+        +usleep(usec: useconds_t): int
+        +nanosleep(req: const struct timespec*, rem: struct timespec*): int
+        +socket(domain: int, type: int, protocol: int): int
+        +connect(sockfd: int, addr: const struct sockaddr*, addrlen: socklen_t): int
+        +accept(s: int, addr: struct sockaddr*, addrlen: socklen_t*): int
+        +read(fd: int, buf: void*, count: size_t): ssize_t
+        +readv(fd: int, iov: const struct iovec*, iovcnt: int): ssize_t
+        +recv(sockfd: int, buf: void*, len: size_t, flags: int): ssize_t
+        +recvfrom(sockfd: int, buf: void*, len: size_t, flags: int, src_addr: struct sockaddr*, addrlen: socklen_t*): ssize_t
+        +recvmsg(sockfd: int, msg: struct msghdr*, flags: int): ssize_t
+        +write(fd: int, buf: const void*, count: size_t): ssize_t
+        +writev(fd: int, iov: const struct iovec*, iovcnt: int): ssize_t
+        +send(s: int, msg: const void*, len: size_t, flags: int): ssize_t
+        +sendto(s: int, msg: const void*, len: size_t, flags: int, to: const struct sockaddr*, tolen: socklen_t): ssize_t
+        +sendmsg(s: int, msg: const struct msghdr*, flags: int): ssize_t
+        +close(fd: int): int
+        +fcntl(fd: int, cmd: int, ...): int
+        +ioctl(d: int, request: unsigned long int, ...): int
+        +getsockopt(sockfd: int, level: int, optname: int, optval: void*, optlen: socklen_t*): int
+        +setsockopt(sockfd: int, level: int, optname: int, optval: const void*, optlen: socklen_t): int
+    }
+
+    %% 关联
+    FdManager "1" *-- "n" FdCtx : 管理全部句柄上下文
+    FdManager ..|> Singleton~FdManager~ : 单例模式 (FdMgr)
+    sylar_hook ..> _HookIniter : 通过静态构造执行Hook注入
+```
+
+---
+
+### 核心实现细节与底层原理深度剖析
+
+#### 1. `Noncopyable` 的引入与 C++ 资源管理哲学
+* **设计初衷**：在多线程框架中，所有的同步原语（互斥锁、读写锁、自旋锁、信号量）都是独占性/状态敏感的系统资源。如果发生锁对象的拷贝或赋值，将导致严重的未定义行为（如解锁未加锁的内存、导致死锁等）。
+* **实现细节**：新增 `Noncopyable` 基类，明确使用 C++11 的 `= delete` 语法禁用了**拷贝构造函数**和**赋值运算符**。随后，将 `Semaphore`、`Mutex` 等全部同步组件继承自该类。这不仅消除了每个类中重复编写 `= delete` 的冗余代码，更在编译期间杜绝了资源被意外拷贝的可能，提升了框架的工程级健壮性。
+
+#### 2. `FdManager` 与 `FdCtx`：句柄状态的守护者
+要实现 IO 协程化，框架必须知道每一个操作的 FD 是什么类型的：
+* **`FdCtx` (文件描述符上下文)**：
+  * **位域优化 (Bit-fields)**：巧妙使用了 `bool m_isInit: 1;` 位域语法，将 5 个布尔状态极致压缩到了同一个字节内，极大节省了高并发下的内存占用。
+  * **非阻塞状态隔离**：分为 `m_sysNonblock`（系统层面是否非阻塞）和 `m_userNonblock`（用户层面是否希望非阻塞）。因为框架为了实现异步，会**强制将所有 Socket 在系统层面设置为 `O_NONBLOCK`**；但为了对用户保持透明，必须单独记录用户原本的设置（如果用户自己设置了非阻塞，框架将不再干预，直接原样返回 `EAGAIN` 让用户自己处理）。
+* **`FdManager` (全局管理器)**：
+  * 使用 `std::vector<FdCtx::ptr>` 以 FD 自身的值作为索引，实现了 $O(1)$ 的极限查询速度。利用读写锁保障多线程下的扩容安全。
+
+#### 3. 动态劫持魔法：`_HookIniter` 与 `dlsym`
+* **如何偷梁换柱？** 框架通过定义与标准 C 库同名的函数（例如 `extern "C" unsigned int sleep(unsigned int seconds)`）来覆盖系统调用。
+* **找回真实函数**：利用宏 `HOOK_FUN(XX)` 结合 `dlsym(RTLD_NEXT, "sleep")` 动态查找符号表。`RTLD_NEXT` 告诉链接器：“不要找我当前重写的这个 `sleep`，去动态库加载链的下一个环节去找真实的 `glibc` 里的 `sleep`”。并将真实地址保存在 `sleep_f` 函数指针中。
+* **时机控制**：定义了结构体 `_HookIniter` 并声明了全局静态变量 `static _HookIniter s_hook_initer;`。这确保了在 C++ 的 `main` 函数执行之前，动态链接劫持就已经初始化完毕。
+
+#### 4. 终极奥义：`do_io` 异步转换模板函数
+`do_io` 是本模块乃至整个框架最核心的黑魔法引擎。几乎所有的读写操作（`read`, `recv`, `send`, `write`）都被这个万能模板重写：
+1. **拦截检查**：检查当前线程是否开启了 Hook（通过 `thread_local bool t_hook_enable` 判断）。如果没有开启，或者 FD 不是 Socket，或者用户自己设置了非阻塞，**直接调用真实系统函数后返回**。
+2. **首次尝试**：调用真实的系统函数尝试读写。如果成功，或者被信号中断（`EINTR`，立刻重试），则直接返回结果。
+3. **异步挂起 (`EAGAIN`)**：如果真实函数返回 `EAGAIN`，代表缓冲区空了（或满了），常规线程会在此死锁。**我们的魔法开始**：
+   * 向 `IOManager` 的 `epoll` 树中注册该事件（例如等待 `EPOLLIN`）。
+   * 获取指定的超时时间，若存在，则创建一个条件定时器。
+   * 调用 `Fiber::YieldToHold()` **将当前协程挂起，让出 CPU 执行权**！
+4. **被动唤醒与重试**：
+   * 当未来某时刻网络数据到达，`IOManager` 的 `idle` 协程中的 `epoll_wait` 会苏醒。
+   * 调度器会将本协程重新放入执行队列。
+   * 本协程在 `Fiber::YieldToHold()` 之后恢复执行：首先检查是否因为超时被唤醒（通过判定 `timer_info->cancelled`）。
+   * 若非超时，利用 `goto retry;` 重新发起真实系统调用。此时数据必然已经就绪，成功读取数据并返回给用户。
+   * **结果**：对于上层业务开发者而言，这就是一行普通的 `recv` 代码，但底层已经完成了一次极其高效的 CPU 让渡与网络事件驱动切换。
+
+#### 5. 特殊的 `connect_with_timeout` 实现
+* `connect` 无法直接复用 `do_io`。因为非阻塞的 `connect` 会立即返回 `EINPROGRESS`（正在建立连接中），而不是 `EAGAIN`。
+* **实现逻辑**：
+  * 发起非阻塞 `connect` 后立刻返回。
+  * 将 Socket 的 `WRITE` 可写事件注册到 `epoll`，并让出协程 `YieldToHold`。
+  * 当 TCP 三次握手成功或失败时，Socket 会变得可写，触发 `epoll` 唤醒协程。
+  * 协程苏醒后，使用 `getsockopt(fd, SOL_SOCKET, SO_ERROR, ...)` 读取内核底层的真实错误码。如果 `error == 0`，代表连接完美建立；否则连接失败。从而实现了带精准超时控制的 TCP 异步直连。
+
+#### 6. 调度器全局联动 (`Scheduler::run`)
+在 `scheduler.cc` 中，我们为 `Scheduler::run` 入口函数增加了 `set_hook_enable(true);`。
+* **深刻意义**：这意味着，**只要是交由 `Scheduler` (及 `IOManager`) 调度执行的任何协程任务，都会自动享受 IO 劫持带来的非阻塞加成**。而独立于调度器之外的普通原生线程，则继续保持传统的阻塞 I/O 行为，互不干扰，极大提升了框架的侵入式兼容性。
+
+---
+
+### 单元测试核心分析 (test_hook.cc)
+* **`test_sleep()`**：同时向调度器抛入两个协程任务，分别 `sleep(2)` 和 `sleep(3)`。由于系统 `sleep` 被劫持变为了底层定时器 + 协程 Yield，主线程不会被卡住。实际运行耗时为 3 秒（而非 2+3=5秒），完美验证了同步代码的异步并发执行。
+* **`test_sock()`**：通过原始的 `socket` -> `connect` -> `send` -> `recv` 请求外部服务器（如百度或 Cloudflare）。代码看起来完全是**同步阻塞式**的经典网络编程，但底层已经全部被 `sylar` 转化为非阻塞状态机，顺利跑完了完整的 HTTP 请求流程，验证了网络 IO 劫持的绝佳稳定性。
+
+---
+
+## IO 协程调度器 (IOManager) 与 定时器 (Timer) (Version 5)
 
 纯粹的协程调度器 (`Scheduler`) 只能解决 CPU 密集型任务的切换，但服务端开发面临的最大瓶颈是 **网络 IO 的阻塞**。
 Version 5 通过引入 `epoll` 和 `pipe` 管道机制，将异步 IO、定时器与协程调度器完美融合，实现了一个真正的 **高性能 Reactor 协程模型**。当网络数据未就绪时，协程挂起并让出 CPU；当 `epoll` 检测到数据就绪时，自动唤醒对应的协程继续执行。
 
-### 9.1 IO与定时器模块核心类图
+### IO与定时器模块核心类图
 
 以下是严格包含所有结构体、枚举、方法签名、成员变量的详尽 UML 类图：
 
@@ -164,7 +349,7 @@ classDiagram
 
 ---
 
-### 9.2 定时器模块 (Timer) 实现深度剖析
+### 定时器模块 (Timer) 实现深度剖析
 
 定时器模块不依赖单独的线程循环，而是极其巧妙地融入到了 `IOManager` 的 `epoll_wait` 阻塞超时机制中。
 
@@ -189,7 +374,7 @@ classDiagram
 
 ---
 
-### 9.3 IO协程调度器 (IOManager) 实现深度剖析
+### IO协程调度器 (IOManager) 实现深度剖析
 
 `IOManager` 是继承自 `Scheduler` 和 `TimerManager` 的集大成者，也是 `sylar` 框架进行网络编程的心脏。
 
@@ -219,7 +404,7 @@ classDiagram
 
 ---
 
-### 9.4 测试用例核心说明 (Tests)
+### 测试用例核心说明 (Tests)
 
 #### `test_iomanager.cc`
 * 揭示了在协程下发起非阻塞 TCP 连接的标准范式。
@@ -237,6 +422,8 @@ classDiagram
 * **避坑指南**：如果业务逻辑写在 lambda 表达式中，并且该 lambda 作为回调传给了脱离当前生命周期的后台定时器：
   * **绝不可按引用捕获** (`[&]`) 局部变量智能指针（如 `s_timer`）。因为触发时外层函数早已结束，局部指针已销毁，访问必报 `Segmentation fault`。
   * **正解**：将需要跨周期管理的智能指针提升为全局/类成员变量（如代码中提取为外部的 `s_timer`），确保其生命周期大于定时器的运行周期。
+
+---
 ## 协程模块 (Fiber) 与 调度器模块 (Scheduler) (Version 4)
 
 随着框架向纯异步、高性能演进，Version 4 引入了**非对称协程 (Asymmetric Coroutine)** 机制，并实现了 **M:N 协程调度模型**（M 个协程在 N 个线程上动态调度），彻底改变了传统的基于回调的异步编程模式。

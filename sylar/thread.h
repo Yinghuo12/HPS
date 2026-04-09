@@ -10,22 +10,20 @@
 #include <stdint.h>
 #include <atomic>
 
+#include "noncopyable.h"
+
 //pthread_xxx
 //std::thread, pthread
 namespace sylar {
 
 
-class Semaphore{
+class Semaphore : Noncopyable {
 public:
     Semaphore(uint32_t count = 0);
     ~Semaphore();
 
     void wait();
     void notify();
-private:
-    Semaphore(const Semaphore&) = delete;
-    Semaphore(const Semaphore&&) = delete;
-    Semaphore& operator=(const Semaphore&) = delete;
 
 private:
     sem_t m_semaphore;
@@ -134,7 +132,7 @@ private:
 
 
 // 通用万能锁（简单场景），但是高并发读场景 性能极差，因此需要RWMutex优化读多写少的情况
-class Mutex {
+class Mutex : Noncopyable {
 public:
     typedef ScopedLockImpl<Mutex> Lock;
 
@@ -160,7 +158,7 @@ private:
 
 
 // 模板支持所有类型的读写锁
-class RWMutex {
+class RWMutex : Noncopyable {
 public:
     typedef ReadScopedLockImpl<RWMutex> ReadLock;
     typedef WriteScopedLockImpl<RWMutex> WriteLock;
@@ -196,7 +194,7 @@ private:
 
 
 // 调试，空锁，不阻塞，不占用系统资源
-class NullMutex {
+class NullMutex : Noncopyable {
 public:
     typedef ScopedLockImpl<NullMutex> Lock;
     NullMutex() {}
@@ -205,7 +203,7 @@ public:
     void unlock() {}
 };
 
-class NullRWMutex {
+class NullRWMutex : Noncopyable {
 public:
     typedef ReadScopedLockImpl<NullMutex> ReadLock;
     typedef WriteScopedLockImpl<NullMutex> WriteLock;
@@ -219,7 +217,7 @@ public:
 
 
 // 系统级自旋锁（安全）
-class Spinlock {
+class Spinlock : Noncopyable {
 public:
     typedef ScopedLockImpl<Spinlock> Lock;
 
@@ -247,7 +245,7 @@ private:
 
 
 // 高性能轻量锁（安全）
-class CASLock {
+class CASLock : Noncopyable {
 public:
     CASLock() {
         m_mutex.clear();

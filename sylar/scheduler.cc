@@ -1,6 +1,7 @@
 #include "scheduler.h"
 #include "log.h"
 #include "macro.h"
+#include "hook.h"
 
 namespace sylar {
 
@@ -137,6 +138,7 @@ void Scheduler::setThis() {
 
 void Scheduler::run() {
     SYLAR_LOG_INFO(g_logger) << "run";
+    set_hook_enable(true);    // 启用hook
     setThis();      // 把当前线程绑定到这个调度器
 
     // 不是主线程，则创建一个主协程
