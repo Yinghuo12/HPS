@@ -88,7 +88,7 @@ static ssize_t do_io(int fd, OriginFun fun, const char* hook_fun_name, uint32_t 
         return fun(fd, std::forward<Args>(args)...);  
     }
 
-    SYLAR_LOG_DEBUG(g_logger) << "do_io<" << hook_fun_name << ">";
+    // SYLAR_LOG_DEBUG(g_logger) << "do_io<" << hook_fun_name << ">";
     
     // 2. 获取 fd 的上下文 FdCtx ，若不存在（例如 fd 没有被管理，可能是普通文件或管道）则直接调系统原函数
     sylar::FdCtx::ptr ctx = sylar::FdMgr::GetInstance()->get(fd);
@@ -121,7 +121,7 @@ retry:
 
     // 二、如果资源暂时不可用，需要进行阻塞进入异步等待
     if(n == -1 && errno == EAGAIN) {
-        SYLAR_LOG_DEBUG(g_logger) << "do_io<" << hook_fun_name << ">";
+        // SYLAR_LOG_DEBUG(g_logger) << "do_io<" << hook_fun_name << ">";
         // 1. 获取IOManager实例
         sylar::IOManager* iom = sylar::IOManager::GetThis();
         sylar::Timer::ptr timer;
@@ -151,9 +151,9 @@ retry:
             }
             return -1;
         } else {
-            SYLAR_LOG_DEBUG(g_logger) << "do_io<" << hook_fun_name << ">";
+            // SYLAR_LOG_DEBUG(g_logger) << "do_io<" << hook_fun_name << ">";
             // 4. 添加事件成功，当前协程让出执行权，等待事件发生或超时
-            SYLAR_LOG_DEBUG(g_logger) << "do_io<" << hook_fun_name << ">";
+            // SYLAR_LOG_DEBUG(g_logger) << "do_io<" << hook_fun_name << ">";
             sylar::Fiber::YieldToHold();
             // 协程被唤醒后，如果定时器存在，则取消定时器
             if(timer) {

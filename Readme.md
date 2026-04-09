@@ -41,6 +41,287 @@ git push -f origin main
 ~~~
 ---
 
+## 网络地址 (Address) 与 Socket 极致封装 (Version 7)
+
+### 版本差异与核心演进亮点
+
+在前面的版本中，我们已经打通了底层协程调度与 IO 劫持，使底层具备了高性能并发能力。但对于上层业务开发而言，直接操作 Linux 原生的 `sockaddr` 结构体、处理大端小端字节序、调用繁琐的 `socket/bind/listen/connect` C 语言 API 依然非常痛苦且容易引发内存泄漏。
+
+**Version 7 进行了全面的面向对象（OOP）抽象，核心升级如下：**
+1. **CPU 分支预测优化 (`macro.h`)**：新增 `SYLAR_LIKELY` 和 `SYLAR_UNLIKELY` 宏。利用 GCC/LLVM 的 `__builtin_expect` 机制，在断言和网络异常判断中主动告诉 CPU 哪些是小概率事件，从而优化指令流水线，提升极限性能。
+2. **字节序转换模块 (`endian.h`)**：引入统一的跨平台字节序转换模板，完美抹平 Host 字节序（通常是小端）与 Network 字节序（大端）的差异。
+3. **强大的地址解析系统 (`Address`)**：将 `sockaddr_in`, `sockaddr_in6`, `sockaddr_un` 完美抽象。内置了强悍的 `getaddrinfo` 域名解析和 `getifaddrs` 本机网卡遍历功能。
+4. **全功能 `Socket` 封装**：继承自 `Noncopyable` 和 `enable_shared_from_this`。通过 RAII 机制彻底杜绝了 FD 泄漏。完美融入了上一版本的 IO Hook 机制，提供了支持超时控制的异步 TCP/UDP 读写接口。
+
+---
+
+### 模块全量核心类图 (UML)
+
+以下是严格包含所有模块、类、枚举、多态虚函数、重载方法及模板方法的详尽 UML 类图：
+
+```mermaid
+classDiagram
+    %% =================宏与工具模块=================
+    class sylar_macro {
+        <<macro>>
+        +SYLAR_LIKELY(x)
+        +SYLAR_UNLIKELY(x)
+        +SYLAR_ASSERT(x)
+        +SYLAR_ASSERT2(x, w)
+    }
+
+    class sylar_endian {
+        <<namespace>>
+        +byteswap~T~(value: T): T $
+        +byteswapOnLittleEndian~T~(t: T): T $
+        +byteswapOnBigEndian~T~(t: T): T $
+    }
+
+    %% =================网络地址模块 (Address)=================
+    class Address {
+        <<abstract>>
+        +~Address() virtual
+        +Create(addr: const sockaddr*, addrlen: socklen_t): Address::ptr $
+        +Lookup(result: std::vector~Address::ptr~&, host: const std::string&, family: int, type: int, protocol: int): bool $
+        +LookupAny(host: const std::string&, family: int, type: int, protocol: int): Address::ptr $
+        +LookupAnyIPAddress(host: const std::string&, family: int, type: int, protocol: int): IPAddress::ptr $
+        +GetInterfaceAddresses(result: std::multimap~std::string, std::pair~Address::ptr, uint32_t~~&, family: int): bool $
+        +GetInterfaceAddresses(result: std::vector~std::pair~Address::ptr, uint32_t~~&, iface: const std::string&, family: int): bool $
+        +getFamily(): int const
+        +getAddr(): const sockaddr* const *
+        +getAddr(): sockaddr* *
+        +getAddrLen(): socklen_t const *
+        +insert(os: std::ostream&): std::ostream& const *
+        +toString(): std::string
+        +operator<(rhs: const Address&): bool const
+        +operator==(rhs: const Address&): bool const
+        +operator!=(rhs: const Address&): bool const
+    }
+
+    class IPAddress {
+        <<abstract>>
+        +Create(address: const char*, port: uint16_t): IPAddress::ptr $
+        +broadcastAddress(prefix_len: uint32_t): IPAddress::ptr *
+        +networdAddress(prefix_len: uint32_t): IPAddress::ptr *
+        +subnetMask(prefix_len: uint32_t): IPAddress::ptr *
+        +getPort(): uint32_t const *
+        +setPort(v: uint16_t): void *
+    }
+
+    class IPv4Address {
+        -m_addr: sockaddr_in
+        +Create(address: const char*, port: uint16_t): IPv4Address::ptr $
+        +IPv4Address(address: const sockaddr_in&)
+        +IPv4Address(address: uint32_t, port: uint16_t)
+        +getAddr(): const sockaddr* const override
+        +getAddr(): sockaddr* override
+        +getAddrLen(): socklen_t const override
+        +insert(os: std::ostream&): std::ostream& const override
+        +broadcastAddress(prefix_len: uint32_t): IPAddress::ptr override
+        +networdAddress(prefix_len: uint32_t): IPAddress::ptr override
+        +subnetMask(prefix_len: uint32_t): IPAddress::ptr override
+        +getPort(): uint32_t const override
+        +setPort(v: uint16_t): void override
+    }
+
+    class IPv6Address {
+        -m_addr: sockaddr_in6
+        +Create(address: const char*, port: uint16_t): IPv6Address::ptr $
+        +IPv6Address()
+        +IPv6Address(address: const sockaddr_in6&)
+        +IPv6Address(address: const uint8_t[16], port: uint16_t)
+        +getAddr(): const sockaddr* const override
+        +getAddr(): sockaddr* override
+        +getAddrLen(): socklen_t const override
+        +insert(os: std::ostream&): std::ostream& const override
+        +broadcastAddress(prefix_len: uint32_t): IPAddress::ptr override
+        +networdAddress(prefix_len: uint32_t): IPAddress::ptr override
+        +subnetMask(prefix_len: uint32_t): IPAddress::ptr override
+        +getPort(): uint32_t const override
+        +setPort(v: uint16_t): void override
+    }
+
+    class UnixAddress {
+        -m_addr: sockaddr_un
+        -m_length: socklen_t
+        +UnixAddress()
+        +UnixAddress(path: const std::string&)
+        +getAddr(): const sockaddr* const override
+        +getAddr(): sockaddr* override
+        +getAddrLen(): socklen_t const override
+        +setAddrLen(v: uint32_t): void
+        +insert(os: std::ostream&): std::ostream& const override
+    }
+
+    class UnknownAddress {
+        -m_addr: sockaddr
+        +UnknownAddress(family: int)
+        +UnknownAddress(addr: const sockaddr&)
+        +getAddr(): const sockaddr* const override
+        +getAddr(): sockaddr* override
+        +getAddrLen(): socklen_t const override
+        +insert(os: std::ostream&): std::ostream& const override
+    }
+
+    Address <|-- IPAddress
+    Address <|-- UnixAddress
+    Address <|-- UnknownAddress
+    IPAddress <|-- IPv4Address
+    IPAddress <|-- IPv6Address
+
+    %% =================Socket 枚举提取=================
+    class Type {
+        <<enumeration>>
+        TCP = SOCK_STREAM
+        UDP = SOCK_DGRAM
+    }
+
+    class Family {
+        <<enumeration>>
+        IPv4 = AF_INET
+        IPv6 = AF_INET6
+        UNIX = AF_UNIX
+    }
+
+    %% =================Socket模块=================
+    class Socket {
+        <<Noncopyable, enable_shared_from_this>>
+        
+        -m_sock: int
+        -m_family: int
+        -m_type: int
+        -m_protocol: int
+        -m_isConnected: bool
+        -m_localAddress: Address::ptr
+        -m_remoteAddress: Address::ptr
+
+        +CreateTCP(address: Address::ptr): Socket::ptr $
+        +CreateUDP(address: Address::ptr): Socket::ptr $
+        +CreateTCPSocket(): Socket::ptr $
+        +CreateUDPSocket(): Socket::ptr $
+        +CreateTCPSocket6(): Socket::ptr $
+        +CreateUDPSocket6(): Socket::ptr $
+        +CreateUnixTCPSocket(): Socket::ptr $
+        +CreateUnixUDPSocket(): Socket::ptr $
+
+        +Socket(family: int, type: int, protocol: int)
+        +~Socket()
+        +getSendTimeout(): int64_t
+        +setSendTimeout(v: int64_t): void
+        +getRecvTimeout(): int64_t
+        +setRecvTimeout(v: int64_t): void
+        +getOption(level: int, option: int, result: void*, len: size_t*): bool
+        +getOption~T~(level: int, option: int, result: T&): bool
+        +setOption(level: int, option: int, result: const void*, len: size_t): bool
+        +setOption~T~(level: int, option: int, value: const T&): bool
+
+        +accept(): Socket::ptr
+        +bind(addr: const Address::ptr): bool
+        +connect(addr: const Address::ptr, timeout_ms: uint64_t): bool
+        +listen(backlog: int): bool
+        +close(): bool
+
+        +send(buffer: const void*, length: size_t, flags: int): int
+        +send(buffers: const iovec*, length: size_t, flags: int): int
+        +sendTo(buffer: const void*, length: size_t, to: const Address::ptr, flags: int): int
+        +sendTo(buffers: const iovec*, length: size_t, to: const Address::ptr, flags: int): int
+        +recv(buffer: void*, length: size_t, flags: int): int
+        +recv(buffers: iovec*, length: size_t, flags: int): int
+        +recvFrom(buffer: void*, length: size_t, from: Address::ptr, flags: int): int
+        +recvFrom(buffers: iovec*, length: size_t, from: Address::ptr, flags: int): int
+
+        +getRemoteAddress(): Address::ptr
+        +getLocalAddress(): Address::ptr
+        +getFamily(): int const
+        +getType(): int const
+        +getProtocol(): int const
+        +isConnected(): bool const
+        +isValid(): bool const
+        +getError(): int
+        +dump(os: std::ostream&): std::ostream& const
+        +getSocket(): int const
+        +cancelRead(): bool
+        +cancelWrite(): bool
+        +cancelAccept(): bool
+        +cancelAll(): bool
+
+        -initSock(): void
+        -newSock(): void
+        -init(sock: int): bool
+    }
+
+    Socket "1" o-- "2" Address : 缓存 Local/Remote Address
+    Socket ..> Type : 依赖枚举
+    Socket ..> Family : 依赖枚举
+```
+
+---
+
+### 核心实现细节与底层原理深度剖析
+
+#### 1. 分支预测黑魔法 (`SYLAR_LIKELY` / `SYLAR_UNLIKELY`)
+* **原理**：现代 CPU 采用高度流水线化执行，遇到 `if-else` 会进行分支预测并提前将指令读入流水线。如果预测失败，CPU 必须清空整条流水线重新加载，性能惩罚极高（约消耗数十个时钟周期）。
+* **实现**：引入 `__builtin_expect(!!(x), 0)` 包装断言 `SYLAR_ASSERT`。因为程序发生断言失败（宕机）的概率极小，告诉 CPU `!(x)` 大概率为 `false`，从而让 CPU 放心大胆地优先预取 `if` 外的正常逻辑指令。在 `Socket::newSock()` 等高频方法中也使用了该宏，榨干 CPU 极限性能。
+
+#### 2. 大小端字节序转换 (`endian.h`)
+* **网络编程痛点**：网络传输协议严格规定必须使用**大端序（Big-Endian）**。而我们常用的 x86 架构 CPU 几乎全是**小端序（Little-Endian）**。
+* **实现细节**：利用 `<byteswap.h>` 中的 `bswap_16/32/64`。通过模板 `std::enable_if` 结合 `sizeof(T)` 实现了 `byteswap` 对所有整型的安全泛型重载。配合宏 `#if BYTE_ORDER == BIG_ENDIAN`，如果是本机是大端，`byteswapOnLittleEndian` 直接返回；若是本机是小端，则调用底层汇编指令级别的高效逆序互换。
+
+#### 3. 地址抽象体系 (`Address` 模块)
+该模块将错综复杂的底层的 `sockaddr` 系列结构体统一收口到了面向对象的继承体系中。
+
+* **智能工厂 (`Address::Create`)**：通过读取传入的底层 C 结构体中的 `sa_family` 字段，配合 `switch` 语句，自动 `dynamic_cast` 实例化出对应的 `IPv4Address`, `IPv6Address` 或是 `UnixAddress` 智能指针对象。
+* **超强域名解析 (`Address::Lookup`)**：
+  * 基于 POSIX 强大的 `getaddrinfo` 函数实现。
+  * **难点攻克**：不仅能解析 `www.baidu.com`，还能精准拆解带端口的复合字符串。通过扫描 `[` 和 `]`，完美兼容了解析 IPv6 特殊格式 `[2001:db8::1]:80`；通过扫描 `:` 处理了普通的 IPv4 `127.0.0.1:8080` 格式。将解析出的一组地址转换为 `Address::ptr` 列表返回。
+* **本机网卡抓取 (`Address::GetInterfaceAddresses`)**：
+  * 利用底层 `getifaddrs` 抓取本机所有的物理/虚拟网卡（如 `eth0`, `lo`）。
+  * **位运算艺术 (`CountBytes`)**：如何根据底层的 netmask（如 `255.255.255.0`）推算出前缀长度（24）？利用了 Brian Kernighan 的经典位运算算法 `value &= value - 1`，该操作可以在 $O(N)$（N为二进制中1的个数）内极速统计出子网掩码中 1 的数量。
+* **子网/广播地址计算**：
+  * `networdAddress`（网络地址）：IP 与 掩码做 `&` 操作。
+  * `broadcastAddress`（广播地址）：IP 与 反码做 `|` 操作。
+* **IPv6 的字符串压缩打印 (`IPv6Address::insert`)**：
+  * IPv6 地址极长，规范允许将连续的 `0` 压缩为 `::`（且只能压缩一次）。该方法内部维护了一个 `used_zeros` 状态机，遍历 8 个 16 位整数段，完美实现了遵循 RFC 规范的优雅打印。
+
+#### 4. 极致封装的网络套接字 (`Socket` 模块)
+`Socket` 将繁杂的句柄操作变为了极简的方法调用，且 **100% 融入了底层的 IO 协程调度框架**。
+
+* **生命周期管理 (RAII)**：构造时初始化或绑定已有 fd，**析构函数 `~Socket()` 强制调用 `close()`**，彻底根治服务器开发最容易犯的 File Descriptor 泄漏问题。并且继承自 `Noncopyable`，防范误拷贝导致的多次 `close()`。
+* **超时时间联动 (`getSendTimeout` / `setRecvTimeout`)**：
+  * 这里不是直接修改底层 socket，而是拦截后与 Version 6 中的 `FdMgr` 句柄管理器联动，将超时状态保存在用户态上下文中。
+* **连接与阻塞控制 (`connect`)**：
+  * 当调用 `sock->connect(addr)` 时，内部会自动判断：如果指定了超时时间，将直接使用 `hook.cc` 中劫持包装好的 `connect_with_timeout`。这使得业务层用同步调用的写法，在底层却实现了 **协程 Yield 挂起等待 + Epoll 异步唤醒**，绝不阻塞当前线程。
+* **Scatter/Gather IO（分散/聚集读写）支持**：
+  * 除了提供普通的 `send/recv` 接收 `void* buffer`，还深度支持传入 `iovec*` 结构。这允许将内存中不连续的多块数据一次性抛给内核去发送（通过 `sendmsg`/`recvmsg`），减少系统调用次数，极大优化零拷贝网络传输性能。
+* **懒加载地址缓存 (`getLocalAddress` / `getRemoteAddress`)**：
+  * 当应用频繁调用获取对端 IP 时，没必要每次都下沉到内核去调 `getpeername`。
+  * **优化细节**：只有在第一次调用时才会执行真实的系统调用，结果被智能工厂转化为 `Address::ptr` 后缓存在 `m_localAddress` 和 `m_remoteAddress` 成员变量中，后续调用 $O(1)$ 极速返回。
+* **优雅的协程取消操作 (`cancelRead/Write`)**：
+  * 当外部强行终止 Socket 时，调用此方法会直接打通到底层的 `IOManager::GetThis()->cancelEvent()`，强制触发 epoll 回调，让沉睡在当前 Socket 上的协程苏醒过来，妥善处理资源回收。
+
+---
+
+### 单元测试核心分析 (Tests)
+
+#### `test_address.cc`
+* **功能验证**：
+  * 测试了基于 `Lookup` 的 DNS 域名解析，能够将 `"www.baidu.com:ftp"` 等字符串准确解析出真实的 IP 列表。
+  * 测试了 `GetInterfaceAddresses`，成功遍历输出当前 Linux 系统上的所有网卡设备名及其关联的 IPv4 / IPv6 地址与子网前缀。
+  * 测试了 `IPv4Address::Create` 的字符串反序列化创建。
+
+#### `test_socket.cc`
+* **功能验证 (The Ultimate Test)**：这是将前面的“协程调度”、“IO劫持”、“地址解析”、“Socket封装”融会贯通的终极测试。
+* **代码流转图**：
+  1. 创建 `IOManager` 启动协程 Reactor 模型。
+  2. 调度业务协程 `test_socket`。
+  3. `Address::LookupAnyIPAddress("www.baidu.com")` 自动发起 DNS 查询获取百度 IP。
+  4. `Socket::CreateTCP` 创建面向对象的 TCP 句柄。
+  5. `sock->connect()` 发起连接。此时由于底层开启了 Hook，当前协程会在 TCP 握手期间**非阻塞自动挂起**，绝不卡死线程。
+  6. 握手成功协程苏醒，直接调用 `sock->send` 发送原生 HTTP GET 报文。
+  7. `sock->recv` 等待响应（同样，若数据未到，协程自动挂起）。
+  8. 收到响应，打印百度首页 HTML 源码，协程完美结束。
+
+---
 
 ## IO_Hook (系统调用劫持) 与 句柄管理 (FdManager) (Version 6)
 

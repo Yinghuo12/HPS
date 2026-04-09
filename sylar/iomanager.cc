@@ -345,7 +345,7 @@ void IOManager::idle() {
             }
 
             // 打印原始事件值和实际事件值
-            SYLAR_LOG_INFO(g_logger) << "event.events=" << event.events << " real_events=" << real_events;
+            // SYLAR_LOG_INFO(g_logger) << "event.events=" << event.events << " real_events=" << real_events;
 
             // 如果内核触发的事件不是我注册关心的事件
             if((fd_ctx->events & real_events) == NONE) {  
