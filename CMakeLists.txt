@@ -31,6 +31,7 @@ set(LIB_SRC
     sylar/fd_manager.cc
     sylar/address.cc
     sylar/socket.cc
+    sylar/bytearray.cc
 )
 
 
@@ -53,6 +54,7 @@ add_executable(test_timer tests/test_timer.cc)
 add_executable(test_hook tests/test_hook.cc)
 add_executable(test_address tests/test_address.cc)
 add_executable(test_socket tests/test_socket.cc)
+add_executable(test_bytearray tests/test_bytearray.cc)
 
 
 # 链接库
@@ -88,6 +90,9 @@ target_link_libraries(test_address sylar -lyaml-cpp)
 
 force_redefine_file_macro_for_sources(test_socket) #__FILE__
 target_link_libraries(test_socket sylar -lyaml-cpp)
+
+force_redefine_file_macro_for_sources(test_bytearray) #__FILE__
+target_link_libraries(test_bytearray sylar -lyaml-cpp)
 
 # 输出路径
 SET(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)

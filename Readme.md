@@ -39,6 +39,200 @@ git add .
 git commit -m "xxx"
 git push -f origin main
 ~~~
+
+---
+
+## 序列化与字节流缓冲区 (ByteArray) (Version 8)
+
+### 版本差异与核心演进亮点
+
+在之前的版本中，我们通过 `Socket` 和 `IOManager` 实现了异步的网络收发。但是，直接发送和接收原始的 `char*` 缓冲存在极大的缺陷：一旦发生数据量突增，传统的连续内存（如 `std::vector<char>` 或 `std::string`）会频繁触发 `realloc`，导致巨量的内存拷贝，引起服务器性能骤降（CPU 抖动）。
+
+**Version 8 彻底解决了内存与序列化问题，核心升级如下：**
+1. **链表式内存池架构**：摒弃了连续内存。底层采用 `Node` 链表串联起一个个固定大小的内存块。按需扩容，**永远不会发生内存搬迁和拷贝**。
+2. **Varint / ZigZag 极致压缩算法**：针对网络传输中常见的小整数，引入了 Google Protocol Buffers (Protobuf) 核心的 Varint 变长整型编码和 ZigZag 负数映射算法。可以将 64 位的整数极限压缩到 1~10 字节，大幅节省网络带宽。
+3. **网络/主机字节序自动转换**：内置大小端转换机制（对接 Version 7 的 `endian.h`），确保序列化的数据在跨平台网络传输时完全一致。
+4. **原生支持 `iovec` (Scatter/Gather I/O)**：提供 `getReadBuffers` 和 `getWriteBuffers`，直接提取链表底层碎片的真实物理地址。配合 `readv`/`writev` 系统调用，实现**零拷贝**级别的高效网络吞吐。
+
+---
+
+### 模块全量核心类图 (UML)
+
+以下是严格包含所有内部结构、属性、数十个序列化重载方法的详尽 UML 类图：
+
+```mermaid
+classDiagram
+    %% =================内部节点结构=================
+    class Node {
+        <<struct>>
+        +ptr: char*
+        +next: Node*
+        +size: size_t
+        +Node()
+        +Node(s: size_t)
+        +~Node()
+    }
+
+    %% =================ByteArray 核心类=================
+    class ByteArray {
+        -m_baseSize: size_t
+        -m_position: size_t
+        -m_capacity: size_t
+        -m_size: size_t
+        -m_endian: int8_t
+        -m_root: Node*
+        -m_cur: Node*
+
+        +ByteArray(base_size: size_t)
+        +~ByteArray()
+
+        %% 固定长度写
+        +writeFint8(value: int8_t): void
+        +writeFuint8(value: uint8_t): void
+        +writeFint16(value: int16_t): void
+        +writeFuint16(value: uint16_t): void
+        +writeFint32(value: int32_t): void
+        +writeFuint32(value: uint32_t): void
+        +writeFint64(value: int64_t): void
+        +writeFuint64(value: uint64_t): void
+
+        %% 可变长度写
+        +writeInt32(value: int32_t): void
+        +writeUint32(value: uint32_t): void
+        +writeInt64(value: int64_t): void
+        +writeUint64(value: uint64_t): void
+
+        %% 浮点与字符串写
+        +writeFloat(value: float): void
+        +writeDouble(value: double): void
+        +writeStringF16(value: const std::string&): void
+        +writeStringF32(value: const std::string&): void
+        +writeStringF64(value: const std::string&): void
+        +writeStringVint(value: const std::string&): void
+        +writeStringWithoutLength(value: const std::string&): void
+
+        %% 固定长度读
+        +readFint8(): int8_t
+        +readFuint8(): uint8_t
+        +readFint16(): int16_t
+        +readFuint16(): uint16_t
+        +readFint32(): int32_t
+        +readFuint32(): uint32_t
+        +readFint64(): int64_t
+        +readFuint64(): uint64_t
+
+        %% 可变长度读
+        +readInt32(): int32_t
+        +readUint32(): uint32_t
+        +readInt64(): int64_t
+        +readUint64(): uint64_t
+
+        %% 浮点与字符串读
+        +readFloat(): float
+        +readDouble(): double
+        +readStringF16(): std::string
+        +readStringF32(): std::string
+        +readStringF64(): std::string
+        +readStringVint(): std::string
+
+        %% 内部操作与游标控制
+        +clear(): void
+        +write(buf: const void*, size: size_t): void
+        +read(buf: void*, size: size_t): void
+        +read(buf: void*, size: size_t, position: size_t): void const
+        +getPosition(): size_t const
+        +setPosition(v: size_t): void
+        +getSize(): size_t const
+        +getBaseSize(): size_t const
+        +getReadSize(): size_t const
+        +isLittleEndian(): bool const
+        +setIsLittleEndian(val: bool): void
+
+        %% 文件 IO 与 字符串导出
+        +writeToFile(name: const std::string&): bool const
+        +readFromFile(name: const std::string&): bool
+        +toString(): std::string const
+        +toHexString(): std::string const
+
+        %% Scatter/Gather IO 支持
+        +getReadBuffers(buffers: std::vector~iovec~&, len: uint64_t): uint64_t const
+        +getReadBuffers(buffers: std::vector~iovec~&, len: uint64_t, position: uint64_t): uint64_t const
+        +getWriteBuffers(buffers: std::vector~iovec~&, len: uint64_t): uint64_t
+
+        -addCapacity(size: size_t): void
+        -getCapacity(): size_t const
+    }
+
+    ByteArray "1" *-- "n" Node : 底层采用单向链表维护内存碎片
+```
+
+---
+
+### 核心算法与底层原理深度剖析
+
+#### 1. 底层存储架构：固定大小的内存块链表
+* **痛点**：由于网络数据流是源源不断的，传统的 `std::vector` 在容量不足时会申请一块原来 2 倍大的新内存，然后把老数据全部 `memcpy` 过去。这种**全量内存搬迁**是高并发服务器的性能杀手。
+* **Sylar 解决方案 (`Node`)**：
+  * 初始化时，分配一个容量为 `m_baseSize`（默认 4096 字节，刚好等于内存一页）的 `Node` 节点。
+  * `m_root` 永远指向链表头部，`m_cur` 指向当前正在操作的节点。
+  * **绝不搬迁**：当调用 `write()` 且当前节点容量不足时，`addCapacity()` 会计算需要的新节点数量，并在链表尾部挂载全新的 `Node`。新老数据物理上不连续，但在逻辑上通过偏移量 `m_position` 被完美抹平。
+
+#### 2. 黑魔法一：Base128 Varint 变长整型压缩
+* **现象**：业务中经常发送类似 ID=`15` 这样的整型。如果用 64 位整数发送，会产生 7 个字节的纯零（`00 00 00 00 00 00 00 0F`），白白浪费了 87% 的网络带宽。
+* **Varint 实现原理 (`writeUint32` / `writeUint64`)**：
+  * 将数字按 **7 位** 进行拆分。
+  * 每个字节的 **最高位（MSB，第 8 位）** 作为标志位：`1` 表示“后面还有数据”，`0` 表示“这是最后一个字节”。
+  * 代码实现中：`while(value >= 0x80) { tmp[i++] = (value & 0x7F) | 0x80; value >>= 7; }`。不断剥离后 7 位，给最高位补 1 压入缓冲区，直到数字本身小于 128。
+  * **收益**：数字 `15` 仅需 1 个字节；极大地压缩了业务通讯的数据包体积。
+
+#### 3. 黑魔法二：ZigZag 负数映射算法
+* **现象**：Varint 虽然好，但是对**负数**极其致命。在计算机的补码表示中，负数（如 `-1`）的二进制全是 1（`FF FF FF FF FF FF FF FF`）。如果用 Varint 压缩负数，不仅无法压缩，反而会膨胀到 10 个字节！
+* **ZigZag 算法原理 (`EncodeZigzag32` / `DecodeZigzag32`)**：
+  * 将有符号整数映射为无符号整数，使得绝对值小的数字（无论正负）映射后依然是一个极小的值。
+  * **映射表**：`0 -> 0`, `-1 -> 1`, `1 -> 2`, `-2 -> 3`, `2 -> 4`。
+  * **Sylar 的巧妙编码**：
+    * `if(v < 0) return (uint32_t)(-v) * 2 - 1; else return v * 2;`
+    * **解码公式**：`return (v >> 1) ^ -(v & 1);`。利用了 C++ 的算术右移和负数补码特性，仅用一行极其优雅的位运算便完美还原了原始正负号。
+  * **流程**：`writeInt32` 会先对数字进行 ZigZag 编码转成无符号数，然后再用 Varint 进行极致压缩。
+
+#### 4. 浮点数的二进制剥离
+* 浮点数 `float` 和 `double` 无法直接进行位运算（不能移位）。
+* **Sylar 实现 (`writeFloat` / `writeDouble`)**：
+  * 极其硬核地使用 `memcpy(&v, &value, sizeof(value));`，直接剥离内存底层的 IEEE 754 标准二进制序列，将其强行转化为无符号整数，然后调用底层的写函数。完美绕过了编译器的类型安全检查，实现了极速序列化。
+
+#### 5. 跨越内存碎片的读写逻辑 (`write` / `read`)
+由于内存被分割成了一个个 4096 字节的 `Node` 碎片，当我们想写入一段长达 10000 字节的数据时，必然会跨越多个节点。
+* **算法实现**：
+  * `npos = m_position % m_baseSize;` 计算出在当前小碎块内的偏移量。
+  * `ncap = m_cur->size - npos;` 计算出当前小碎块还剩多少容量。
+  * 利用 `while(size > 0)` 循环。如果剩余容量 `ncap` 够用，直接 `memcpy` 并更新指针；如果不够，先把当前碎块填满（`memcpy(..., ncap)`），然后触发 `m_cur = m_cur->next;`，切到下一个节点继续填，直到全部写完。
+
+#### 6. 零拷贝核心：`iovec` 的神级集成
+* 当 `Socket` 要发送 `ByteArray` 里的数据时，如果把链表里的碎片拼接成一块完整的内存再发送，就又产生了内存拷贝。
+* **`getReadBuffers` 实现细节**：
+  * 根据当前 `m_position`，遍历链表节点。
+  * 对于每一个带有有效数据的 `Node`，将其内存的首地址 `cur->ptr + npos` 赋给系统结构体 `iovec.iov_base`，数据长度赋给 `iovec.iov_len`。
+  * 最终返回一个 `vector<iovec>`。此时只需调用一次系统 API `writev`（聚集写），Linux 内核网卡驱动会自动去这多个物理不连续的内存地址里抓取数据发送。**全程 0 次用户态内存拷贝**！
+
+#### 7. 游标控制 (`setPosition`) 边界坑点
+* 当通过 `setPosition` 强行重置读写游标时，需要将 `m_cur` 指针挪到对应的链表节点。
+* **代码高亮**：
+  * 循环递减 `v -= m_cur->size; m_cur = m_cur->next;`。
+  * **临界判断**：如果重置后 `v` 刚好等于 `m_cur->size`，说明游标恰好落在当前块的绝对末尾。如果不额外处理，下一次写入就会越界崩溃。代码中通过 `if(v == m_cur->size) m_cur = m_cur->next;` 完美处理了这一隐蔽的边界灾难。
+
+---
+
+### 单元测试核心分析 (Tests)
+
+#### `test_bytearray.cc`
+* **随机数据鲁棒性测试**：
+  * 测试代码通过宏 `XX(type, len, write_fun, read_fun, base_len)` 生成大批量的 `rand()` 随机正负数、不同类型的整数。
+  * 将 `m_baseSize` 刻意设置为极限的 `1` 字节。这意味着，就算写入一个 `uint64_t` 的 8 字节整数，也会**被迫跨越 8 个链表节点**，对 `write` 和 `read` 跨块处理逻辑进行了最严苛的极限压力测试。
+  * 测试结果：写入后再 `setPosition(0)` 重新读取，并配合 `SYLAR_ASSERT`，保证了百万次跨内存碎片读写的零误差。
+* **持久化能力测试**：
+  * 调用 `writeToFile` 将极其零碎的链表数据连续地写入物理磁盘的 `.dat` 文件。
+  * 创建一个崭新的 `ByteArray` 调用 `readFromFile` 加载数据，通过对比两者的 `toString()` 判断完全一致，验证了文件流导出/导入的绝对可靠性。
+
 ---
 
 ## 网络地址 (Address) 与 Socket 极致封装 (Version 7)
