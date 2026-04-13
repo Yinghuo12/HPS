@@ -12,6 +12,27 @@ https://github.com/jbeder/yaml-cpp
 https://www.boost.org/releases/latest/
 ~~~
 
+### http编译测试
+~~~bash
+# 1. 把http11_common.h http11_parser.h  httpclient_parser.h  httpclient_parser.rl  http11_parser.rl 放在sylar/http目录下
+
+# 2. 安装ragel
+sudo apt update
+sudo apt install ragel
+ragel -v
+
+# 3. 编译
+cd sylar/http
+ragel -G2 -C http11_parser.rl -o http11_parser.rl.cc
+ragel -G2 -C httpclient_parser.rl -o httpclient_parser.rl.cc
+
+# HTTP请求测试
+sudo apt install telnet
+telnet www.baidu.com 80
+GET / HTTP/1.0  # 两次回车
+
+~~~
+
 ### 项目构建
 ~~~bash
 cd build
@@ -39,6 +60,275 @@ git add .
 git commit -m "xxx"
 git push -f origin main
 ~~~
+
+---
+
+## HTTP 协议封装与极速解析 (Ragel) (Version 9)
+
+### 版本差异与核心演进亮点
+
+如果想要在我们的协程框架之上搭建高吞吐量的 Web 框架，就必须具备极速解析 HTTP 报文的能力。
+
+**Version 9 的核心升级如下：**
+1. **全面且强类型的 HTTP 协议封装**：通过宏自动生成了全量 HTTP Method 和 Status Code 的枚举与字符串映射，彻底消除了魔法数字 (Magic Number)。封装了 `HttpRequest` 和 `HttpResponse` 面向对象体系。
+2. **基于 Ragel 状态机的解析引擎**：抛弃了低效的正则和字符串切分。引入了 Ragel 语法文件 (`.rl`)，通过编译生成 C/C++ 代码级别的高效状态机 (`.rl.cc`)，实现了逐字节级别的状态跳转解析，性能达到了 Nginx / Node.js 的同等级别。
+3. **零拷贝设计与原地截断**：解析器在提取 URI、Header 等字段时，通过指针 `at` 和长度 `length` 进行标记，并在解析完成后通过 `memmove` 将未处理的 Body 数据原地前移，最大程度降低了内存申请和拷贝开销。
+4. **无缝集成全局配置系统**：利用之前开发的 `Config` 模块，将请求/响应的最大缓冲区大小、最大 Body 长度全部实现了热更新配置管理。
+
+---
+
+### 模块全量核心类图 (UML)
+
+以下是严格包含所有枚举、结构体、类模板、虚函数、回调函数及成员变量的详尽 UML 类图：
+
+```mermaid
+classDiagram
+    %% ================= HTTP 宏与枚举 =================
+    class HttpMethod {
+        <<enumeration>>
+        DELETE, GET, HEAD, POST, PUT, CONNECT...
+        INVALID_METHOD
+    }
+
+    class HttpStatus {
+        <<enumeration>>
+        CONTINUE, OK, BAD_REQUEST, NOT_FOUND, INTERNAL_SERVER_ERROR...
+    }
+
+    class HttpUtil {
+        <<namespace>>
+        +StringToHttpMethod(m: const std::string&): HttpMethod $
+        +CharsToHttpMethod(m: const char*): HttpMethod $
+        +HttpMethodToString(m: const HttpMethod&): const char* $
+        +HttpStatusToString(s: const HttpStatus&): const char* $
+    }
+
+    class CaseInsensitiveLess {
+        <<struct>>
+        +operator()(lhs: const std::string&, rhs: const std::string&): bool const
+    }
+
+    %% ================= 模板方法 =================
+    class MapHelper {
+        <<namespace>>
+        +checkGetAs~MapType, T~(m: const MapType&, key: const std::string&, val: T&, def: const T&): bool $
+        +getAs~MapType, T~(m: const MapType&, key: const std::string&, def: const T&): T $
+    }
+
+    %% ================= HTTP 实体对象 =================
+    class HttpRequest {
+        -m_method: HttpMethod
+        -m_version: uint8_t
+        -m_close: bool
+        -m_path: std::string
+        -m_query: std::string
+        -m_fragment: std::string
+        -m_body: std::string
+        -m_headers: MapType
+        -m_params: MapType
+        -m_cookies: MapType
+        
+        +HttpRequest(version: uint8_t, close: bool)
+        +getMethod(): HttpMethod const
+        +getVersion(): uint8_t const
+        +getPath(): const std::string& const
+        +getQuery(): const std::string& const
+        +getBody(): const std::string& const
+        +getHeaders(): const MapType& const
+        +getParams(): const MapType& const
+        +getCookies(): const MapType& const
+        +setMethod(v: HttpMethod): void
+        +setVersion(v: uint8_t): void
+        +setPath(v: const std::string&): void
+        +setQuery(v: const std::string&): void
+        +setFragment(v: const std::string&): void
+        +setBody(v: const std::string&): void
+        +isClose(): bool const
+        +setClose(v: bool): void
+        +setHeaders(v: const MapType&): void
+        +setParams(v: const MapType&): void
+        +setCookies(v: const MapType&): void
+        +getHeader(key: const std::string&, def: const std::string&): std::string const
+        +getParam(key: const std::string&, def: const std::string&): std::string const
+        +getCookie(key: const std::string&, def: const std::string&): std::string const
+        +setHeader(key: const std::string&, val: const std::string&): void
+        +setParam(key: const std::string&, val: const std::string&): void
+        +setCookie(key: const std::string&, val: const std::string&): void
+        +delHeader(key: const std::string&): void
+        +delParam(key: const std::string&): void
+        +delCookie(key: const std::string&): void
+        +hasHeader(key: const std::string&, val: std::string*): bool
+        +hasParam(key: const std::string&, val: std::string*): bool
+        +hasCookie(key: const std::string&, val: std::string*): bool
+        +checkGetHeaderAs~T~(key: const std::string&, val: T&, def: const T&): bool
+        +getHeaderAs~T~(key: const std::string&, def: const T&): T
+        +checkGetParamAs~T~(key: const std::string&, val: T&, def: const T&): bool
+        +getParamAs~T~(key: const std::string&, def: const T&): T
+        +checkGetCookieAs~T~(key: const std::string&, val: T&, def: const T&): bool
+        +getCookieAs~T~(key: const std::string&, def: const T&): T
+        +dump(os: std::ostream&): std::ostream& const
+        +toString(): std::string const
+    }
+
+    class HttpResponse {
+        -m_status: HttpStatus
+        -m_version: uint8_t
+        -m_close: bool
+        -m_body: std::string
+        -m_reason: std::string
+        -m_headers: MapType
+
+        +HttpResponse(version: uint8_t, close: bool)
+        +getStatus(): HttpStatus const
+        +getVersion(): uint8_t const
+        +getBody(): const std::string& const
+        +getReason(): const std::string& const
+        +getHeaders(): const MapType& const
+        +setStatus(v: HttpStatus): void
+        +setVersion(v: uint8_t): void
+        +setBody(v: const std::string&): void
+        +setReason(v: const std::string&): void
+        +setHeaders(v: const MapType&): void
+        +isClose(): bool const
+        +setClose(v: bool): void
+        +getHeader(key: const std::string&, def: const std::string&): std::string const
+        +setHeader(key: const std::string&, val: const std::string&): void
+        +delHeader(key: const std::string&): void
+        +checkGetHeaderAs~T~(key: const std::string&, val: T&, def: const T&): bool
+        +getHeaderAs~T~(key: const std::string&, def: const T&): T
+        +dump(os: std::ostream&): std::ostream& const
+        +toString(): std::string const
+    }
+
+    %% ================= C语言风格回调 =================
+    class ParserCallbacks {
+        <<C Functions>>
+        +on_request_method(data: void*, at: const char*, length: size_t): void $
+        +on_request_uri(data: void*, at: const char*, length: size_t): void $
+        +on_request_fragment(data: void*, at: const char*, length: size_t): void $
+        +on_request_path(data: void*, at: const char*, length: size_t): void $
+        +on_request_query(data: void*, at: const char*, length: size_t): void $
+        +on_request_version(data: void*, at: const char*, length: size_t): void $
+        +on_request_header_done(data: void*, at: const char*, length: size_t): void $
+        +on_request_http_field(data: void*, field: const char*, flen: size_t, value: const char*, vlen: size_t): void $
+        
+        +on_response_reason(data: void*, at: const char*, length: size_t): void $
+        +on_response_status(data: void*, at: const char*, length: size_t): void $
+        +on_response_chunk(data: void*, at: const char*, length: size_t): void $
+        +on_response_version(data: void*, at: const char*, length: size_t): void $
+        +on_response_header_done(data: void*, at: const char*, length: size_t): void $
+        +on_response_last_chunk(data: void*, at: const char*, length: size_t): void $
+        +on_response_http_field(data: void*, field: const char*, flen: size_t, value: const char*, vlen: size_t): void $
+    }
+
+    %% ================= HTTP 解析器 =================
+    class HttpRequestParser {
+        -m_parser: http_parser
+        -m_data: HttpRequest::ptr
+        -m_error: int
+
+        +HttpRequestParser()
+        +execute(data: char*, len: size_t): size_t
+        +isFinished(): int
+        +hasError(): int
+        +getData(): HttpRequest::ptr const
+        +setError(v: int): void
+        +getContentLength(): uint64_t
+        +getParser(): const http_parser& const
+        +GetHttpRequestBufferSize(): uint64_t $
+        +GetHttpRequestMaxBodySize(): uint64_t $
+    }
+
+    class HttpResponseParser {
+        -m_parser: httpclient_parser
+        -m_data: HttpResponse::ptr
+        -m_error: int
+
+        +HttpResponseParser()
+        +execute(data: char*, len: size_t, chunk: bool): size_t
+        +isFinished(): int
+        +hasError(): int
+        +getData(): HttpResponse::ptr const
+        +setError(v: int): void
+        +getContentLength(): uint64_t
+        +getParser(): const httpclient_parser& const
+        +GetHttpResponseBufferSize(): uint64_t $
+        +GetHttpResponseMaxBodySize(): uint64_t $
+    }
+
+    HttpRequest "1" o-- "n" CaseInsensitiveLess : 使用其作为 Header 字典比较器
+    HttpResponse "1" o-- "n" CaseInsensitiveLess : 使用其作为 Header 字典比较器
+    HttpRequestParser "1" *-- "1" HttpRequest : 包含被解析的数据对象
+    HttpResponseParser "1" *-- "1" HttpResponse : 包含被解析的数据对象
+```
+
+---
+
+### 核心实现细节与底层原理深度剖析
+
+#### 1. 宏驱动的枚举系统 (`HTTP_METHOD_MAP` / `HTTP_STATUS_MAP`)
+* **设计痛点**：HTTP 有 30 多种方法和 60 多种状态码，手写 `switch-case` 进行字符串映射不仅极易出错，而且后期维护极其痛苦。
+* **宏的艺术 (`#define XX`)**：
+  * 在 `http.h` 中统一定义了一份宏列表。
+  * **玩法 1：生成枚举**。`#define XX(num, name, string) name = num,`，展开后自动生成类似 `GET = 1, POST = 3` 的 `enum class HttpMethod`。
+  * **玩法 2：生成解析逻辑**。在 `http.cc` 中：
+    ```cpp
+    #define XX(num, name, string) if(strcmp(#string, m.c_str()) == 0) return HttpMethod::name;
+    ```
+    这里极其巧妙地利用了预处理器操作符 `#`（字符串化），瞬间生成了 34 个 `if` 语句，零错误率实现了字符串到枚举的极速转换。
+  * **玩法 3：生成数组映射**。通过 `const char* s_method_string[]` 数组索引，实现了从枚举到字符串 $O(1)$ 时间复杂度的反射。
+
+#### 2. 大小写不敏感的字典树 (`CaseInsensitiveLess`)
+* **网络规范要求**：RFC 规定，HTTP 的 Header 字段（如 `Content-Length` 和 `content-length`）**必须忽略大小写**。但是 C++ 标准库的 `std::map` 默认是大小写敏感的。
+* **自定义比较器**：
+  * 定义了 `CaseInsensitiveLess` 仿函数，重载 `operator()`。
+  * 内部调用 C 标准库的高效函数 `strcasecmp` 进行比较。
+  * 在 `HttpRequest` 中将 `MapType` 声明为 `std::map<std::string, std::string, CaseInsensitiveLess>`。这样无论业务层用什么大小写调用 `getHeader()` 或是解析器压入数据，底层都能准确命中，极其优雅。
+
+#### 3. 泛型类型转换 (`getAs` / `checkGetAs`)
+* HTTP 请求传来的参数全部是字符串（例如 `"1024"`），业务层经常需要将其转为 `int`, `float`, `uint64_t` 等。
+* **实现细节**：借助 `boost::lexical_cast<T>` 强大的泛型能力，封装了异常安全的提取函数。当转换失败（如把字母转为数字）时，自动捕获 `catch (...)` 并返回调用方指定的默认值 `def`，彻底避免了因畸形网络包导致服务端崩溃的风险。
+
+#### 4. Ragel 状态机解析引擎与 C 回调粘合
+这是本模块最核心的性能引擎。
+* **Ragel 简介**：Ragel 能够将自定义的正则语法（`.rl` 文件）编译成极其紧凑的纯 C 语言 goto/状态矩阵代码。它的运行速度极快，无需在运行时构建语法树。
+* **底层解析原理 (`execute`)**：
+  * 调用 Ragel 生成的 `http_parser_execute` (或 `httpclient_parser_execute`)。该函数内部是一个巨大的状态机矩阵。它逐个读取 `char* data` 中的字符。
+  * 一旦状态机成功识别出一个 Token（比如识别出遇到了空格，前面的单词就是 `GET` Method），就会**立即触发注册的 C 语言回调函数**（如 `on_request_method`）。
+* **回调与上下文绑定 (`static_cast`)**：
+  * 因为 Ragel 生成的解析器是纯 C 代码，不支持面向对象。
+  * **破局之法**：在 `HttpRequestParser` 构造时，将 `this` 指针赋给了 `m_parser.data`。当触发全局 C 回调（如 `on_request_method(void *data, ...)`）时，强制将其 `static_cast<HttpRequestParser*>(data)` 转换回来。这样就在纯 C 的回调流中拿到了 C++ 的类实例，进而愉快地调用 `parser->getData()->setMethod(m)` 修改对象属性。
+* **零拷贝与指针游标 (`at`, `length`)**：
+  * 注意回调函数的签名：它只传给了你字符串的起始地址 `at` 和长度 `length`。**它并没有把字符串拷贝出来给你**！这是极致性能的体现。
+  * 在回调内部，只有在最终存入 `m_data` 字典时，才会构造 `std::string`。如果不需要保存（例如 `on_request_uri` 暂时留空），则发生零拷贝。
+
+#### 5. 缓冲区处理与截断 (`memmove`)
+网络包可能会发生 TCP 粘包（一次收到 1.5 个 HTTP 请求）。
+* **截断机制 (`memmove`)**：
+  * `execute` 跑完后，会返回它成功解析的**总字节数** `offset`。
+  * `memmove(data, data + offset, (len - offset));`
+  * 此时，`data` 中已解析完毕的 Headers 会被覆盖丢弃，剩下的只有 Body（如果存在）或者是下一个 HTTP 报文的头部。这种原地平移技术极其高效，彻底避免了重新 `malloc` 新缓冲区。
+
+#### 6. 联动热更新配置系统 (`_RequestSizeIniter`)
+* 为了防范诸如 **HTTP Header 恶意超长攻击 (Slowloris / 缓冲区溢出)**，我们在 `http_parser.cc` 中通过匿名命名空间定义了 `_RequestSizeIniter`。
+* 它利用 Version 2 中的 `Config::Lookup` 创建了全局变量 `http.request.buffer_size` 等配置项，并直接**注册了 `addListener` 监听器**。
+* 只要配置文件发生变动，静态缓存 `s_http_request_buffer_size` 就会被实时修改，整个过程无锁化，热更新即刻生效。
+
+---
+
+### 单元测试核心分析 (Tests)
+
+#### `test_http.cc`
+* **基础对象测试**：
+  * 手动装配了一个 `HttpRequest` 和 `HttpResponse` 对象，设置了诸如 `Host`, `Content-Length` 和 Body 等属性。
+  * 调用 `dump` 进行序列化，输出标准的 HTTP 报文。验证了底层换行符 `\r\n` 的正确拼接以及 `CaseInsensitiveLess` 字典树的行为。
+
+#### `test_http_parser.cc`
+* **状态机解析压测**：
+  * 定义了一段包含完整 Request 行、Headers 和 Body 的合法网络字节流：`const char test_request_data[]`。
+  * 通过 `parser.execute(&tmp[0], tmp.size());` 一口吞入整个字符串。
+  * 测试结果将显示：`isFinished() == 1` (代表 Header 解析完美结束)，且返回了正确的 `offset` 偏移量。
+  * 最精彩的是打印截断后的 `tmp`，会发现此时 Header 已经被完全抹去，只剩下了 `"1234567890"`（这是原本的 Body），完美验证了 `memmove` 的原地截断逻辑。同理验证了 Response 返回包的解析正确性。
 
 ---
 
