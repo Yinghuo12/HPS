@@ -39,6 +39,7 @@ uint64_t HttpResponseParser::GetHttpResponseMaxBodySize() {
 }
 
 
+// 初始化的结构放到匿名namespace, 这样不会污染全局命名空间
 namespace {
 struct _RequestSizeIniter {
     _RequestSizeIniter() {

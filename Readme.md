@@ -57,6 +57,22 @@ ip addr
 
 ![echo_server](./assets/echo_server.png)
 
+### HTTP_Server 测试
+~~~bash
+# 1.http_server测试
+./test_http_server
+ip addr  
+找到 inet [ip]/xx metric 100 brd xxx scope global dynamic eth0 
+# 我的IP：192.168.139.145
+# 端口：8020（在 test_http_server.cc 里修改）
+打开网页输入 192.168.139.145:8020              # ❌ 默认 404 Not Found
+打开网页输入 192.168.139.145:8020/yinghuo      # ❌ 404（你没写这个路径）
+打开网页输入 192.168.139.145:8020/yinghuo/xx   # ✅ 精准匹配（你代码里写了这个）
+打开网页输入 192.168.139.145:8020/yinghuo/abc  # ✅ 通配符匹配（/* 匹配所有下级路径）
+打开网页输入 192.168.139.145:8020/yinghuo/123  # ✅ 通配符匹配 
+~~~
+![http://192.168.139.145:8020/yinghuo](./assets/test_http_server_1.png)
+![http://192.168.139.145:8020/yinghuo/xx](./assets/test_http_server_2.png)
 ### 项目构建
 ~~~bash
 cd build
@@ -84,6 +100,197 @@ git add .
 git commit -m "xxx"
 git push -f origin main
 ~~~
+
+---
+
+## Stream 流式接口与 HTTP Server 架构 (Version 11)
+
+### 版本差异与核心演进亮点
+
+在以往的网络编程中，我们总是直接操作 `Socket` 的 `send` 和 `recv`。但这会导致代码与具体的网络套接字强耦合，如果未来我们需要在数据流外层加上 TLS/SSL 加密，或者将数据输出到文件中，业务代码将面临灾难性的重构。
+
+**Version 11 的核心升级如下：**
+1. **统一流式抽象 (`Stream`)**：模仿 Java/C# 的 IO 流设计，抽象出顶层的 `Stream` 接口。无论是底层的 TCP Socket、加密的 SSL Socket，还是未来的 File Stream，只要实现了该接口，上层业务即可实现**无缝切换与统一读写**。
+2. **HTTP 会话封装 (`HttpSession`)**：继承自 `SocketStream`，在普通的字节流之上，赋予了流“解析 HTTP 报文”的高级能力，彻底屏蔽了底层的 Ragel 状态机细节。
+3. **HTTP 服务器引擎 (`HttpServer`)**：直接继承自 `TcpServer`，利用双 Reactor 模型处理海量并发连接，支持 Keep-Alive 长连接维持。
+4. **Servlet 动态路由分发 (`ServletDispatch`)**：借鉴了 Java EE 的 Servlet 规范。支持**精准匹配** (`/api/login`) 和**通配符模糊匹配** (`/static/*`)，彻底解耦了网络接入层与实际业务处理逻辑。
+
+---
+
+### 模块全量核心类图 (UML)
+
+#### 1. Stream 流式抽象模块类图
+
+```mermaid
+classDiagram
+    class Stream {
+        <<abstract>>
+        +~Stream() virtual
+        +read(buffer: void*, length: size_t): int *
+        +read(ba: ByteArray::ptr, length: size_t): int *
+        +readFixSize(buffer: void*, length: size_t): int virtual
+        +readFixSize(ba: ByteArray::ptr, length: size_t): int virtual
+        +write(buffer: const void*, length: size_t): int *
+        +write(ba: ByteArray::ptr, length: size_t): int *
+        +writeFixSize(buffer: const void*, length: size_t): int virtual
+        +writeFixSize(ba: ByteArray::ptr, length: size_t): int virtual
+        +close(): void *
+    }
+
+    class SocketStream {
+        #m_socket: Socket::ptr
+        #m_owner: bool
+
+        +SocketStream(sock: Socket::ptr, owner: bool)
+        +~SocketStream()
+        +read(buffer: void*, length: size_t): int override
+        +read(ba: ByteArray::ptr, length: size_t): int override
+        +write(buffer: const void*, length: size_t): int override
+        +write(ba: ByteArray::ptr, length: size_t): int override
+        +close(): void override
+        +getSocket(): Socket::ptr const
+        +isConnected(): bool const
+    }
+
+    SocketStream --|> Stream : 实现抽象流接口
+    SocketStream "1" o-- "1" Socket : 组合包装 Socket 句柄
+```
+
+#### 2. HTTP Server 业务处理模块类图
+
+```mermaid
+classDiagram
+    %% ================= 会话与服务器架构 =================
+    class HttpSession {
+        +HttpSession(sock: Socket::ptr, owner: bool)
+        +recvRequest(): HttpRequest::ptr
+        +sendResponse(rsp: HttpResponse::ptr): int
+    }
+
+    class HttpServer {
+        -m_isKeepalive: bool
+        -m_dispatch: ServletDispatch::ptr
+        
+        +HttpServer(keepalive: bool, worker: IOManager*, accept_worker: IOManager*)
+        +getServletDispatch(): ServletDispatch::ptr const
+        +setServletDispatch(v: ServletDispatch::ptr): void
+        #handleClient(client: Socket::ptr): void override
+    }
+
+    HttpSession --|> SocketStream : 继承底层流能力
+    HttpServer --|> TcpServer : 继承异步多路复用网络骨架
+    HttpServer "1" *-- "1" ServletDispatch : 拥有全局路由分发器
+
+    %% ================= Servlet 路由处理架构 =================
+    class Servlet {
+        <<abstract>>
+        #m_name: std::string
+        +Servlet(name: const std::string&)
+        +~Servlet() virtual
+        +handle(request: HttpRequest::ptr, response: HttpResponse::ptr, session: HttpSession::ptr): int32_t *
+        +getName(): const std::string& const
+    }
+
+    class FunctionServlet {
+        <<typedef callback = std::function<...>>>
+        -m_cb: callback
+        +FunctionServlet(cb: callback)
+        +handle(request: HttpRequest::ptr, response: HttpResponse::ptr, session: HttpSession::ptr): int32_t override
+    }
+
+    class ServletDispatch {
+        -m_mutex: RWMutexType
+        -m_datas: std::unordered_map~std::string, Servlet::ptr~
+        -m_globs: std::vector~std::pair<std::string, Servlet::ptr>~
+        -m_default: Servlet::ptr
+
+        +ServletDispatch()
+        +handle(request: HttpRequest::ptr, response: HttpResponse::ptr, session: HttpSession::ptr): int32_t override
+        +addServlet(uri: const std::string&, slt: Servlet::ptr): void
+        +addServlet(uri: const std::string&, cb: FunctionServlet::callback): void
+        +addGlobServlet(uri: const std::string&, slt: Servlet::ptr): void
+        +addGlobServlet(uri: const std::string&, cb: FunctionServlet::callback): void
+        +delServlet(uri: const std::string&): void
+        +delGlobServlet(uri: const std::string&): void
+        +getDefault(): Servlet::ptr const
+        +setDefault(v: Servlet::ptr): void
+        +getServlet(uri: const std::string&): Servlet::ptr
+        +getGlobServlet(uri: const std::string&): Servlet::ptr
+        +getMatchedServlet(uri: const std::string&): Servlet::ptr
+    }
+
+    class NotFoundServlet {
+        +NotFoundServlet()
+        +handle(request: HttpRequest::ptr, response: HttpResponse::ptr, session: HttpSession::ptr): int32_t override
+    }
+
+    ServletDispatch --|> Servlet : 自身也是一个Servlet(组合模式)
+    FunctionServlet --|> Servlet : 实现基于Lambda的快速业务回调
+    NotFoundServlet --|> Servlet : 内置兜底404处理逻辑
+    ServletDispatch "1" *-- "n" Servlet : 路由表管理多个业务实例
+```
+
+---
+
+### 核心实现细节与底层原理深度剖析
+
+#### 1. Stream 流式抽象模块深度剖析
+流式抽象的核心目的是为了**解决由于 TCP 底层切包带来的“数据读取不完整”问题**。
+
+* **纯虚函数约束 (`read` / `write`)**：
+  * 这四个方法是纯虚函数，子类必须实现。它约定了最基础的内存读写能力。不管是原生的 `char*` 数组，还是我们高度封装的高性能零拷贝 `ByteArray` 链表池，都支持作为数据载体。
+* **精准大小读写封装 (`readFixSize` / `writeFixSize`)**：
+  * **应用痛点**：在网络编程中，调用 `read(buf, 1000)` 有时只会返回 200 个字节（因为网卡缓冲区就这么多），剩余的 800 字节还在路上。如果业务直接拿去解析必然出错。
+  * **实现细节**：这四个方法在基类中给出了**具体实现**。内部采用了一个精妙的 `while(left > 0)` 循环。它会不断调用子类实现的底层 `read/write`，动态累加 `offset` 偏移量并递减剩余大小 `left`。只有当真正读满/写满指定的 `length`，或者底层连接断开/异常时，循环才会退出。这为后续解析定长的 HTTP Body 提供了绝对的安全保障。
+
+* **SocketStream 的实体包装**：
+  * **生命周期托管 (`m_owner`)**：构造时支持传入 `owner` 标志位。如果为 `true`，则 `SocketStream` 对象析构时，会自动调用底层 `Socket` 的 `close()`。这是 RAII 思想的延伸。
+  * **读写实现**：重写了基类的虚函数。对于 `char*` 直接调用 `Socket::recv/send`；对于 `ByteArray` 载体，极致发挥了 Version 8 中 `iovec` 零拷贝的优势。调用 `ba->getWriteBuffers` 直接索要物理碎片内存，交给底层的聚集/分散 IO 系统调用，并在成功后通过 `ba->setPosition` 智能推移内存游标。
+
+#### 2. HttpSession：协议解析与网络收发的纽带
+* **`recvRequest()` 的复杂状态机流转**：
+  * 该方法负责从套接字中抽取出完整的 HTTP 报文。
+  * 每次循环从 `SocketStream` 读出一段数据，交给 `HttpRequestParser` 去执行 Ragel 状态机解析。
+  * **截断与偏移 (`offset`) 管理**：如果状态机报告解析成功了 `nparse` 字节，通过 `offset = len - nparse` 计算出是否有残余数据。这些残余数据往往是粘包带进来的 HTTP Body 或下一个报文的 Header，绝对不能丢弃。
+  * **Body 读取**：Header 解析完毕后，通过 `parser->getContentLength()` 获取精准的 Body 大小。如果刚刚由于粘包多读了 `offset` 字节的 Body，先把它剥离出来；剩下的缺失字节，**强制调用流基类的 `readFixSize` 确保读满**。最终生成一个结构完美的 `HttpRequest` 对象。
+* **`sendResponse(rsp)`**：
+  * 极其轻量优雅。重载了 `std::ostream` 的 `<<` 运算符后，直接把面向对象的 `HttpResponse` 冲刷到底层的字符串流，然后调用 `writeFixSize` 保证全部发送。
+
+#### 3. HttpServer：双 Reactor 与长连接支持
+* **架构融合**：继承自上一版的超级骨架 `TcpServer`。
+* **长连接逻辑 (`handleClient`)**：
+  * 这是重写的最核心的业务逻辑，在这个被分配到 Worker 线程的独立协程中运行。
+  * 用 `do-while(m_isKeepalive)` 包裹了整个会话。只要客户端不主动掐断，且没有发来 `Connection: close`，这个协程就不会结束，会不断地从 `HttpSession` 中剥离出下一个请求。
+  * 获取请求后，将生杀大权移交给核心的路由系统：`m_dispatch->handle(req, rsp, session)`。
+  * 路由执行完毕后，调用 `sendResponse` 将响应打回客户端。
+
+#### 4. Servlet：优雅的动态路由分发系统
+参照 Java 经典的 Tomcat/Spring MVC 架构，我们构建了一套纯 C++ 的高性能 Servlet 容器。
+
+* **`Servlet` 基类**：规定了任何业务处理器都必须实现 `handle` 虚函数。
+* **`FunctionServlet`**：
+  * **设计哲学**：在现代 C++ (C++11及以后) 编程中，人们更喜欢用轻量的 Lambda 闭包而非沉重的继承类来编写简单逻辑。
+  * 此类包装了 `std::function`。它允许开发者直接向路由中塞入一个 Lambda 表达式。在 `handle` 被调用时，透传给内部绑定的闭包函数。
+* **`NotFoundServlet` (兜底策略)**：
+  * 默认实例化。当黑客扫描或者路径不存在时，自动返回 `404 Not Found` 状态码和一段默认的 HTML 代码。
+* **`ServletDispatch` 核心路由匹配器**：
+  * **并发安全**：由于服务器运行时可能有别的线程在动态添加/删除路由，内部维护了 `RWMutex` 读写锁。
+  * **精准匹配 (`m_datas`)**：采用 `std::unordered_map`（哈希表）。当请求路径如 `/login` 到来时，实现 $O(1)$ 的极限检索速度。
+  * **模糊匹配 (`m_globs`)**：采用 `std::vector<pair>`。由于模糊匹配可能存在多个规则（例如 `/static/*` 和 `/static/js/*`），内部使用 C 语言经典的 `fnmatch` 库函数进行通配符模式匹配，遍历查找最优解。
+  * **匹配优先级 (`getMatchedServlet`)**：
+    首先尝试在哈希表中进行**精准查找**；如果失败，再遍历数组进行**通配符模糊匹配**；如果均失败，返回默认的 `NotFoundServlet`。整个匹配逻辑严丝合缝。
+
+---
+
+### 单元测试核心分析 (Tests)
+
+#### `test_http_server.cc`
+* **全流程联调验证**：
+  1. 初始化带有 2 个线程的协程调度器 `IOManager`。
+  2. 创建 `HttpServer` 实例并绑定本机所有的 `8020` 端口。
+  3. **注册精准路由**：`sd->addServlet("/yinghuo/xx", ...)`。利用 Lambda 函数优雅地实现了业务逻辑。当客户端访问此路径时，服务器会将完整的请求报文（转换成 string）作为 Response Body 返回给客户端。
+  4. **注册模糊路由**：`sd->addGlobServlet("/yinghuo/*", ...)`。无论客户端访问 `/yinghuo/123` 还是 `/yinghuo/test/abc`，只要前缀匹配，都会被此 Lambda 拦截。并在返回体前面加上 `Glob:\r\n` 作为验证标记。
+  5. 启动服务器协程 `server->start()`，此时你可以通过 `curl` 或浏览器任意发起高并发长连接测试，底层将在全异步非阻塞状态下完美承载。
 
 ---
 
