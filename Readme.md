@@ -30,8 +30,32 @@ ragel -G2 -C httpclient_parser.rl -o httpclient_parser.rl.cc
 sudo apt install telnet
 telnet www.baidu.com 80
 GET / HTTP/1.0  # 两次回车
-
 ~~~
+
+### TcpServer / EchoServer 测试
+~~~bash
+# 1.tcp_server测试
+./test_tcp_server
+sudo apt install net-tools
+netstat -ap | grep test_  # 查看
+telnet 127.0.0.1 8080     # 另开会话连接 端口号在test_tcp_server.cc中修改
+
+kill -9 <pid>
+sudo rm -f /tmp/unix_addr # 解决unix套接字文件死锁
+
+# 2. echo_server测试
+./echo_server -t          # 文本
+telnet 127.0.0.1 8020      # 另开会话连接 端口号在echo_server.cc中修改
+./echo_server -b          # 二进制
+
+# 3. 网页测试
+ip addr  
+# 找到inet [ip]/xx metric 100 brd xxx scope global dynamic eth0 # 我这里ip是192.168.139.145
+# 打开网页输入 192.168.139.145:8020  或者是 192.168.139.145:8020/yinghuo?id=vvv#frag
+~~~
+会看到
+
+![echo_server](./assets/echo_server.png)
 
 ### 项目构建
 ~~~bash
@@ -60,6 +84,150 @@ git add .
 git commit -m "xxx"
 git push -f origin main
 ~~~
+
+---
+
+## TcpServer 服务端封装 (Version 10)
+
+### 版本差异与核心演进亮点
+
+在以往的网络编程中，编写一个高性能的服务器需要处理海量的 `epoll_wait`、`accept`、线程池分发以及连接保活问题。业务逻辑往往被淹没在这些底层的状态机管理代码中。
+
+**Version 10 的核心升级如下：**
+1. **纯异步面向对象抽象**：彻底屏蔽了 `epoll` 和底层的协程切换细节。用户只需要继承 `TcpServer` 并重写 `handleClient` 虚函数，即可获得一个具备 10 万+ 并发处理能力的非阻塞 TCP 服务器。
+2. **多核/多线程反应堆模型 (Multi-Reactor)**：`TcpServer` 内部剥离出了 `m_acceptWorker`（专门负责处理连接接入）和 `m_worker`（专门负责处理客户端数据读写）。这正是 Nginx / Netty 的核心架构思想。
+3. **多地址并发监听**：不仅支持绑定单个 IP:Port，还支持通过 `std::vector<Address::ptr>` 一次性同时监听 IPv4、IPv6 甚至是本地的 UNIX 域套接字，极大地增强了部署的灵活性。
+4. **安全与优雅停机 (Graceful Shutdown)**：通过 `shared_from_this` 结合 Lambda 闭包的生命周期延长技术，完美解决了服务器在关闭时因连接尚未断开而导致的悬空指针和 Core Dump 灾难。
+
+---
+
+### 模块全量核心类图 (UML)
+
+以下是严格包含所有的结构、重载方法、默认参数及成员变量的详尽 UML 类图：
+
+```mermaid
+classDiagram
+    %% ================= 基础组件回顾 =================
+    class Noncopyable {
+        <<class>>
+        +Noncopyable() default
+        +~Noncopyable() default
+        -Noncopyable(const Noncopyable&) : deleted
+        -operator=(const Noncopyable&) : deleted
+    }
+
+    %% ================= TCP 服务器骨架 =================
+    class TcpServer {
+        <<enable_shared_from_this, Noncopyable>>
+        
+        -m_socks: std::vector~Socket::ptr~
+        -m_worker: IOManager*
+        -m_acceptWorker: IOManager*
+        -m_recvTimeout: uint64_t
+        -m_name: std::string
+        -m_isStop: bool
+
+        +TcpServer(woker: IOManager*, accept_woker: IOManager*)
+        +~TcpServer() virtual
+        
+        +bind(addr: Address::ptr): bool virtual
+        +bind(addrs: const std::vector~Address::ptr~&, fails: std::vector~Address::ptr~&): bool virtual
+        +start(): bool virtual
+        +stop(): void virtual
+
+        +getRecvTimeout(): uint64_t const
+        +getName(): std::string const
+        +setRecvTimeout(v: uint64_t): void
+        +setName(v: const std::string&): void
+        +isStop(): bool const
+
+        #handleClient(client: Socket::ptr): void virtual
+        #startAccept(sock: Socket::ptr): void virtual
+    }
+
+    TcpServer --|> Noncopyable : 继承以防拷贝
+    TcpServer "1" *-- "n" Socket : 维护一组正在监听的Socket句柄
+    TcpServer "1" o-- "2" IOManager : 依赖外部分配的Reactor协程池
+
+    %% ================= 具体业务服务器示例 =================
+    class EchoServer {
+        -m_type: int
+        +EchoServer(type: int)
+        +handleClient(client: Socket::ptr): void override
+    }
+
+    EchoServer --|> TcpServer : 继承并重写核心业务逻辑
+```
+
+---
+
+### 核心实现细节与底层原理深度剖析
+
+#### 1. 双 Reactor 架构设计 (`m_acceptWorker` & `m_worker`)
+* **架构痛点**：如果让处理 `accept` 的线程同时处理客户端的读写请求，一旦某个恶意的客户端发送超大报文或者业务处理极慢，会导致该线程无法及时处理新的 `accept` 请求，造成连接排队甚至被操作系统丢弃。
+* **Sylar 的解决方案**：
+  * 在构造函数 `TcpServer(woker, accept_woker)` 中，默认采用当前执行流所在的 `IOManager`。
+  * 但在超高并发场景下，用户可以传入两个**不同的 `IOManager` 实例**。
+  * **`m_acceptWorker`（Boss 线程组）**：专门负责运行 `startAccept` 协程，它的唯一任务就是在监听端口上“死循环”等待新连接。
+  * **`m_worker`（Worker 线程组）**：一旦 `accept` 拿到新连接的 Socket，就将该 Socket 打包，抛入 `m_worker` 中。这样，后续几十万条连接的数据解析、编解码、业务处理全部由 Worker 线程组在协程中并发执行，彻底解放 Boss 线程。
+
+#### 2. 多端口/多协议并发绑定 (`bind` 方法)
+* `TcpServer` 的内部成员 `m_socks` 是一个 `std::vector<Socket::ptr>` 而不是单个 Socket。
+* **实现逻辑**：
+  * `bind` 重载方法接收一个 `vector<Address::ptr>`，可以在一个 `TcpServer` 实例上同时绑定 `0.0.0.0:80`（IPv4）、`[::]:80`（IPv6）甚至 `/tmp/sylar.sock`（UNIX Domain Socket）。
+  * 函数会遍历地址列表，依次创建 Socket，调用 `sock->bind()` 和 `sock->listen()`。
+  * **容错机制**：如果某个端口被占用导致绑定失败，函数会将失败的地址塞入 `fails` 数组并继续绑定下一个。最后如果 `fails` 不为空，不仅返回 `false`，还会立刻将之前已绑定的所有 Socket 执行 `clear()` 回收，保证了服务器启动状态的原子性（要么全部绑定成功，要么全部失败退出）。
+
+#### 3. 永不停歇的监听协程 (`startAccept` 方法)
+* 它是整个服务器连接接入的“发动机”。在 `start()` 方法中被投入到 `m_acceptWorker` 执行。
+* **核心代码**：`while(!m_isStop) { Socket::ptr client = sock->accept(); ... }`
+* **巧妙之处**：
+  * 这里的 `sock->accept()` 并不是原生的阻塞 C 函数，而是 Version 7 中封装的 `Socket::accept`，其内部会触发 Version 6 的 `IO Hook`！
+  * 当没有新连接时，这个 `accept` 会立刻返回 `EAGAIN`，然后底层将其注册到 epoll 中等待 `EPOLLIN` 事件，最后调用 `YieldToHold()` 将当前协程挂起。
+  * **结论**：虽然代码看起来像是一个暴力的死循环，但在底层，它**完全不消耗任何 CPU**。这就是 C++ 协程黑魔法的魅力所在。
+  * 当客户端连接成功后，获取到一个全新的客户端 Socket 实例，设置其默认读写超时时间（`m_recvTimeout`），然后通过 `std::bind` 组装好参数，扔给 `m_worker->schedule()` 分配新的协程去处理。
+
+#### 4. 业务处理的核心抽象 (`handleClient` 虚函数)
+* 这个方法被定义为 `virtual void`，是整个 `TcpServer` 留给开发者的扩展点。
+* 在基类 `TcpServer` 中，它只做了一件事：打个日志。
+* 开发者只需继承 `TcpServer`，重写这个方法，即可在这个函数里书写同步的读写逻辑。一旦执行到这个函数，代表底层已经完成了一次完美的非阻塞连接建立，并且当前代码是运行在一个**独立的轻量级协程**中的。
+
+#### 5. 生命周期的极致保护 (`stop` 安全停机机制)
+* 服务器退出时，最容易发生段错误的地方就是异步回调中访问了已经被析构的对象。
+* **Sylar 的终极防护**：
+  ```cpp
+  auto self = shared_from_this();
+  m_acceptWorker->schedule([this, self]() {
+      for(auto& sock : m_socks) {
+          sock->cancelAll();
+          sock->close();
+      }
+      m_socks.clear();
+  });
+  ```
+  * **为什么有了 `this` 还要捕获 `self`？**
+    Lambda 闭包中捕获 `this` 只是拿到了当前对象的一个裸指针。当 `schedule` 把这个关闭任务异步扔给 `m_acceptWorker` 去执行时，由于是多线程环境，外层的 `TcpServer` 可能已经被析构。如果此时闭包里执行 `sock->cancelAll()` 就会触发 Core Dump。
+  * 捕获 `self` (即 `shared_ptr`) 使得 Lambda 闭包强制持有了 `TcpServer` 实例的一个强引用计数。这确保了在整个停机逻辑执行完毕之前，`TcpServer` 对象**绝对不会在内存中被销毁**。安全、优雅、滴水不漏。
+
+---
+
+### 实际业务演练与单元测试 (Tests)
+
+#### `test_tcp_server.cc`
+* 这是一个极简的服务器启动测试。
+* 定义了监听地址 `0.0.0.0:8080`，通过 `while(!tcp_server->bind(addrs, fails)) { sleep(2); }` 实现了端口被占用时的自动重试逻辑。
+* 最终调用 `tcp_server->start()`，此时服务器协程在后台默默运转，主线程优雅退出或等待。
+
+#### `echo_server.cc` (性能压测演示代码)
+这是基于 `TcpServer` 构建的第一个真实业务服务器：**回显服务器 (Echo Server)**。
+
+1. **继承与重写**：定义了 `EchoServer` 继承自 `TcpServer`，并在构造函数中接收 `-t` 或 `-b` 参数以决定输出文本流还是十六进制。
+2. **重写 `handleClient`**：
+   * 在这个独立协程中，首先通过 `sylar::ByteArray::ptr ba` 分配了一块底层链表内存池。
+   * **零拷贝读**：进入 `while(true)` 死循环，调用 `ba->getWriteBuffers(iovs, 1024)` 获取底层的空闲物理碎片内存。然后调用封装好的 `client->recv`，使用 `iovec` 将客户端发来的数据**直接写入内存碎块，0 次用户态拷贝**。
+   * **错误处理**：`recv` 返回 `0` 代表对端合法关闭（如客户端断开 WiFi 或关闭进程），返回 `< 0` 代表超时或其他异常。这两种情况都会 `break` 退出循环，协程自然死亡，资源被自动释放回收。
+   * **流式处理**：读取完成后，将游标清零，将客户端发来的二进制流转换为 `toHexString()` 并输出到控制台。
+3. **命令行交互**：利用 `argc` 和 `argv` 解析启动参数，使得这个微型服务器具备了极强的实用性和极高的并发吞吐能力。
 
 ---
 

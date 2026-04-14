@@ -36,6 +36,7 @@ set(LIB_SRC
     sylar/http/http11_parser.rl.cc
     sylar/http/httpclient_parser.rl.cc
     sylar/http/http_parser.cc
+    sylar/tcp_server.cc
 )
 
 
@@ -59,6 +60,8 @@ add_executable(test_socket tests/test_socket.cc)
 add_executable(test_bytearray tests/test_bytearray.cc)
 add_executable(test_http tests/test_http.cc)
 add_executable(test_http_parser tests/test_http_parser.cc)
+add_executable(test_tcp_server tests/test_tcp_server.cc)
+add_executable(echo_server sylar/examples/echo_server.cc)
 
 
 # 链接库
@@ -103,6 +106,12 @@ target_link_libraries(test_http sylar -lyaml-cpp)
 
 force_redefine_file_macro_for_sources(test_http_parser) #__FILE__
 target_link_libraries(test_http_parser sylar -lyaml-cpp)
+
+force_redefine_file_macro_for_sources(test_tcp_server) #__FILE__
+target_link_libraries(test_tcp_server sylar -lyaml-cpp)
+
+force_redefine_file_macro_for_sources(echo_server) #__FILE__
+target_link_libraries(echo_server sylar -lyaml-cpp)
 
 # 输出路径
 SET(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)
