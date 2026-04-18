@@ -1,0 +1,15 @@
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: *
+alt-svc: h3=":443"; ma=86400
+CF-RAY: 9ee2a2888c1cd015-SJC
+Content-Length: 144
+Content-Type: application/xml
+Date: Sat, 18 Apr 2026 09:27:39 GMT
+Nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
+Report-To: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=VSbGaE%2B8tA9hoiwmsitBVMztZrTaHcysCx8E2DFYMQKcbd3rRwQr%2BpDQRI4y3A3db13PzmuB%2FGBBT4%2BOnGqo1ujtvSBcMvbQTsCk4MjxAVyXoe1WRu03pRgLf8uqczA%3D"}]}
+Server: cloudflare
+Server-Timing: cfEdge;dur=51,cfOrigin;dur=0,cfWorker;dur=8
+connection: close
+content-length: 144
+
+<?xml version="1.0" encoding="UTF-8"?><slideshow><title>Sample Slide Show</title><date>2024-12-18</date><author>Yours Truly</author></slideshow>

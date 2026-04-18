@@ -75,6 +75,9 @@ FdManager::FdManager() {
 }
 
 FdCtx::ptr FdManager::get(int fd, bool auto_create) {
+    if(-1 == fd) {
+        return nullptr;
+    }
     RWMutexType::ReadLock lock(m_mutex);
     if((int)m_datas.size() <= fd) {
         if(auto_create == false) {

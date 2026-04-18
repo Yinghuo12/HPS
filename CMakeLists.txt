@@ -42,8 +42,13 @@ set(LIB_SRC
     sylar/http/http_session.cc
     sylar/http/http_server.cc
     sylar/http/servlet.cc
+    sylar/http/http_connection.cc
+    sylar/uri.rl.cc
 )
 
+# ragelmaker(sylar/http/http11_parser.rl LIB_SRC ${CMAKE_CURRENT_SOURCE_DIR}/sylar/http)
+# ragelmaker(sylar/http/httpclient_parser.rl LIB_SRC ${CMAKE_CURRENT_SOURCE_DIR}/sylar/http)
+# ragelmaker(sylar/uri.rl LIB_SRC ${CMAKE_CURRENT_SOURCE_DIR}/sylar)
 
 # 编译库
 add_library(sylar SHARED ${LIB_SRC})
@@ -68,6 +73,8 @@ add_executable(test_http_parser tests/test_http_parser.cc)
 add_executable(test_tcp_server tests/test_tcp_server.cc)
 add_executable(echo_server sylar/examples/echo_server.cc)
 add_executable(test_http_server tests/test_http_server.cc)
+add_executable(test_http_connection tests/test_http_connection.cc)
+add_executable(test_uri tests/test_uri.cc)
 
 
 # 链接库
@@ -121,6 +128,13 @@ target_link_libraries(echo_server sylar -lyaml-cpp)
 
 force_redefine_file_macro_for_sources(test_http_server) #__FILE__
 target_link_libraries(test_http_server sylar -lyaml-cpp)
+
+force_redefine_file_macro_for_sources(test_http_connection) #__FILE__
+target_link_libraries(test_http_connection sylar -lyaml-cpp)
+
+force_redefine_file_macro_for_sources(test_uri) #__FILE__
+target_link_libraries(test_uri sylar -lyaml-cpp)
+
 
 # 输出路径
 SET(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)
