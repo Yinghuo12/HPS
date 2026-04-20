@@ -75,6 +75,7 @@ add_executable(echo_server sylar/examples/echo_server.cc)
 add_executable(test_http_server tests/test_http_server.cc)
 add_executable(test_http_connection tests/test_http_connection.cc)
 add_executable(test_uri tests/test_uri.cc)
+add_executable(my_http_server samples/my_http_server.cc)
 
 
 # 链接库
@@ -134,6 +135,9 @@ target_link_libraries(test_http_connection sylar -lyaml-cpp)
 
 force_redefine_file_macro_for_sources(test_uri) #__FILE__
 target_link_libraries(test_uri sylar -lyaml-cpp)
+
+force_redefine_file_macro_for_sources(my_http_server) #__FILE__
+target_link_libraries(my_http_server sylar -lyaml-cpp)
 
 
 # 输出路径

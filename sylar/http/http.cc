@@ -163,8 +163,7 @@ std::ostream& HttpRequest::dump(std::ostream& os) const {
     }
 
     if(!m_body.empty()) {
-        os << "content-length: " << m_body.size() << "\r\n\r\n"
-           << m_body;
+        os << "content-length: " << m_body.size() << "\r\n\r\n" << m_body;
     } else {
         os << "\r\n";
     }

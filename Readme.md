@@ -100,7 +100,28 @@ cd ../bin
 ./test_xxx
 ~~~
 
-### 1.7 git操作
+### 1.7 压力测试
+~~~bash
+sudo apt install apache2-utils  # 压力测试工具
+ab -V
+cd bin
+./test_http_server
+ab -n 1000000 -c 200  "http://192.168.139.145:8020/" # 压测自己的
+
+sudo apt install nginx
+ab -n 1000000 -c 200  "http://192.168.139.145:80/" # 压测nginx
+~~~
+
+短连接：自己的 vs nginx 线程数：1 (修改my_http_server.cc中为false)
+![alt text](./assets/stress_test_mine_1.png)
+![alt text](./assets/stress_test_nginx_1.png)
+
+
+长连接：自己的 vs nginx 线程数：1 (修改my_http_server.cc中为true)
+![alt text](./assets/stress_test_mine_2.png)
+![alt text](./assets/stress_test_nginx_2.png )
+
+### 1.8 git操作
 
 补充笔记
 

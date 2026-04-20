@@ -139,6 +139,7 @@ void TimerManager::listExpiredCb(std::vector<std::function<void()> >& cbs) {
 
     // 检测系统时间是否重置
     bool rollover = detectClockRollover(now_ms);
+    if(m_timers.empty()) return;  // 压力测试段错误解决：加这一行！
     if(!rollover && ((*m_timers.begin())->m_next > now_ms)) {
         return;
     }

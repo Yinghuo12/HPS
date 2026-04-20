@@ -92,6 +92,11 @@ FdCtx::ptr FdManager::get(int fd, bool auto_create) {
 
     RWMutexType::WriteLock lock2(m_mutex);
     FdCtx::ptr ctx(new FdCtx(fd));
+    // 🚨 压力测试bug: bus error 修改：必须在这里增加扩容逻辑！防止数组越界！
+    if ((int)m_datas.size() <= fd) {
+        m_datas.resize(fd * 1.5); // 动态扩容，以满足当前 fd 的需求，一般按照 1.5 倍扩容 
+    }
+    // --- 修改部分结束 ---
     m_datas[fd] = ctx;
     return ctx;
 }

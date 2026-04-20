@@ -30,6 +30,11 @@ void HttpServer::handleClient(Socket::ptr client) {
 //        SYLAR_LOG_INFO(g_logger) << "requst:" << std::endl << *req;
 //        SYLAR_LOG_INFO(g_logger) << "response:" << std::endl << *rsp;
         session->sendResponse(rsp);
+
+        if(!m_isKeepalive || req->isClose()) {
+            // std::cout << "keep_alive=" << m_isKeepalive << " req_close=" << req->isClose() << std::endl;
+            break;
+        }
     } while(m_isKeepalive);
     session->close();
 }
