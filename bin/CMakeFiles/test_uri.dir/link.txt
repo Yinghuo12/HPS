@@ -1,1 +1,0 @@
-/usr/bin/c++  -rdynamic -O0 -ggdb -std=c++11 -Wall -Wno-deprecated -Werror -Wno-unused-function -Wno-builtin-macro-redefined CMakeFiles/test_uri.dir/tests/test_uri.cc.o -o test_uri   -L/home/yinghuo/code/sylar/./lib  -Wl,-rpath,/home/yinghuo/code/sylar/./lib:/home/yinghuo/code/sylar/lib /home/yinghuo/code/sylar/lib/libsylar.so -lyaml-cpp 

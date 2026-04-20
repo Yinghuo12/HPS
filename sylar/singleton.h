@@ -1,6 +1,8 @@
 #ifndef __SYLAR_SINGLETON_H__
 #define __SYLAR_SINGLETON_H__
 
+#include <memory>
+
 namespace sylar {
 
 // 通过 X 和 N 参数，可给同一类型创建多个独立单例：例如下面两行代码分别创建了两个 LoggerManager单例，GetInstance()返回的就是不同的实例
