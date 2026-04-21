@@ -45,6 +45,7 @@ set(LIB_SRC
     sylar/http/http_connection.cc
     sylar/uri.rl.cc
     sylar/daemon.cc
+    sylar/env.cc
 )
 
 # ragelmaker(sylar/http/http11_parser.rl LIB_SRC ${CMAKE_CURRENT_SOURCE_DIR}/sylar/http)
@@ -78,6 +79,7 @@ add_executable(test_http_connection tests/test_http_connection.cc)
 add_executable(test_uri tests/test_uri.cc)
 add_executable(my_http_server samples/my_http_server.cc)
 add_executable(test_daemon tests/test_daemon.cc)
+add_executable(test_env tests/test_env.cc)
 
 # 链接库
 force_redefine_file_macro_for_sources(test) #__FILE__
@@ -142,6 +144,9 @@ target_link_libraries(my_http_server sylar -lyaml-cpp)
 
 force_redefine_file_macro_for_sources(test_daemon) #__FILE__
 target_link_libraries(test_daemon sylar -lyaml-cpp)
+
+force_redefine_file_macro_for_sources(test_env) #__FILE__
+target_link_libraries(test_env sylar -lyaml-cpp)
 
 # 输出路径
 SET(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)
