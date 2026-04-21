@@ -11,3 +11,6 @@ include/boost/**
 
 include/yaml-cpp/**
 !include/yaml-cpp/
+
+# 日志文件
+bin/logs/**

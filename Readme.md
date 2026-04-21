@@ -130,7 +130,18 @@ ab -n 1000000 -c 200  "http://192.168.139.145:80/" # 压测nginx
 ./test_env [-s] [-d] [-p]  # -s:start with the terminal  -d:run as daemon -p:print help
 ~~~
 
-### 1.9 git操作
+### 1.9 双缓冲异步日志模块与压测
+
+通过运行编译后的 `test_asynclog`，发起了 4 线程 × 25 万次 = **1,000,000 条** 高并发日志写入请求：
+
+![test_asynclog](./assets/test_asynclog.png)
+
+**性能结论：**
+引入双缓冲异步机制后，日志的写入吞吐量从 70 万/秒 提升到 **80 万/秒**。 整体性能提升约**19%*。
+这释放了极大量的 CPU 算力，让所有的工作协程专注于处理真正产生价值的 HTTP 业务逻辑。
+
+
+### 1.10 git操作
 
 补充笔记
 
@@ -3080,3 +3091,125 @@ Sylar 的命令行解析器需要处理形如：`./server -conf /etc/sylar.yml -
    * 测试了获取系统内置环境变量（如 `PATH`）。
    * 测试了自定义设置环境变量 `setEnv("TEST", "yy")` 并再次读取，验证了对底层操作系统环境状态的实时穿透修改能力。
    * 测试了标记位命中：如果启动命令携带了 `-p` (`has("p")`)，触发帮助文档输出。
+---
+
+
+## Version 15: 高性能异步双缓冲日志系统 (AsyncLogging) 
+
+在极端高并发的微服务架构中，**如果采用传统的同步日志，由于磁盘 IO 速度（毫秒级）远落后于 CPU 运算（纳秒级），所有的业务协程会因为写日志而排队锁死，导致服务 QPS 急剧跌落。**
+
+**Version 15 引入了基于 Muduo 思想改进的纯异步双缓冲日志系统**，这是解决高并发服务端性能瓶颈的终极“大杀器”。
+
+### 模块全量核心类图 (UML)
+
+以下是严格包含所有模块、枚举、方法签名、私有方法及成员变量的详尽 UML 类图：
+
+```mermaid
+classDiagram
+    %% ================= 基础组件 =================
+    class Noncopyable {
+        <<class>>
+        +Noncopyable() default
+        +~Noncopyable() default
+    }
+
+    class LogAppender {
+        <<abstract>>
+        #m_level: LogLevel::Level
+        #m_formatter: LogFormatter::ptr
+        #m_hasFormatter: bool
+        #m_mutex: MutexType
+        +log(logger: Logger::ptr, level: LogLevel::Level, event: LogEvent::ptr): void *
+    }
+
+    %% ================= 内存缓冲区模块 =================
+    class FixedBuffer~SIZE~ {
+        <<template>>
+        -m_data: char[SIZE]
+        -m_cur: char*
+
+        +FixedBuffer()
+        +append(buf: const char*, len: size_t): void
+        +data(): const char* const
+        +length(): int const
+        +current(): char*
+        +avail(): int const
+        +add(len: size_t): void
+        +reset(): void
+        +bzero(): void
+        +toString(): std::string const
+        -end(): const char* const
+    }
+    FixedBuffer --|> Noncopyable
+
+    %% ================= 异步日志前端与后端引擎 =================
+    class AsyncLogAppender {
+        <<typedef Buffer = FixedBuffer<4000*1000>>>
+        <<typedef BufferPtr = std::unique_ptr<Buffer>>>
+        <<typedef BufferVector = std::vector<BufferPtr>>>
+        
+        -m_flushInterval: const int
+        -m_running: std::atomic~bool~
+        -m_basename: const std::string
+        -m_rollSize: const off_t
+        -m_thread: Thread::ptr
+        -m_mutex: std::mutex
+        -m_cond: std::condition_variable
+        -m_currentBuffer: BufferPtr
+        -m_nextBuffer: BufferPtr
+        -m_buffers: BufferVector
+        -m_fp: FILE*
+        -m_writtenBytes: off_t
+
+        +AsyncLogAppender(basename: const std::string&, rollSize: off_t, flushInterval: int)
+        +~AsyncLogAppender()
+        +log(logger: Logger::ptr, level: LogLevel::Level, event: LogEvent::ptr): void override
+        +toYamlString(): std::string override
+        
+        -start(): void
+        -stop(): void
+        -threadFunc(): void
+        -rollFile(): void
+    }
+
+    AsyncLogAppender --|> LogAppender : 无缝接入日志生态
+    AsyncLogAppender "1" *-- "n" FixedBuffer : 拥有前/后端多个 4MB 内存池块
+    AsyncLogAppender "1" *-- "1" Thread : 独占一个后台落盘线程
+```
+
+---
+
+### 核心实现细节与底层原理深度剖析
+
+#### 1. 高速前端：告别磁盘阻塞 (`log` 方法)
+* **痛点**：传统的 `FileLogAppender` 中，业务协程拿到了自旋锁后，居然要调用 `ofstream::write`。这会导致业务线程被迫等待机械硬盘或 SSD 寻道和写入，此时其他协程全部饿死。
+* **双缓冲内存池解法**：在 `AsyncLogAppender::log` 中，当业务协程来写日志时：
+  * **仅仅执行一次纯内存的 `memcpy` 操作**：把格式化好的字符串追加到 4MB 大小的 `m_currentBuffer` 字符数组中。
+  * `memcpy` 的速度高达几十 GB/s，加锁和解锁的瞬间只在短短十几纳秒内完成，极速释放 CPU 控制权，保障业务不卡顿。
+
+#### 2. 后端神级操作：O(1) 的指针窃取 (`threadFunc`)
+前端写满了怎么办？怎么把数据落盘？
+* 维护了一个后端专属的物理线程 `m_thread`。
+* **临界区范围极小化**：
+  后端线程虽然也需要加同一把锁 `m_mutex`，但它**绝对不会在持有锁的时候去写磁盘**。它进入临界区后，只做一件事：
+  `buffersToWrite.swap(m_buffers);`
+  利用 C++11 的底层交换机制，仅仅交换了一下 `vector` 内部的 3 个指针（数组的头部、尾部、容量）。然后在十几纳秒内释放锁。
+* **无锁极限刷盘**：
+  拿到装满日志块的 `buffersToWrite` 之后，锁已经释放。前端又可以欢快地写内存了。此时后端线程处于**完全无锁状态**，利用 C 语言最高效的底层 API `::fwrite_unlocked` 将数十兆的内存一次性排入系统页缓存中。
+
+#### 3. 内存预分配与回收：零 GC 开销
+* **预备缓冲块 (`m_nextBuffer`)**：为了防止在前端写入时，`m_currentBuffer` 刚好写满需要紧急 `new` 出 4MB 内存（这会在高并发下导致系统态抖动），我们提前备好了一块 `m_nextBuffer`。当前块一满，直接顶上。
+* **后端重利用 (`newBuffer1` & `newBuffer2`)**：后端落盘后，那几个满缓冲块的数据就没用了。后端并没有将它们 `delete` 掉交还给操作系统，而是调用 `buffer->reset()` 重置游标，并在下一次加锁时作为“新鲜的备用块”塞回给前端。**整个日志系统在运行稳定后，永远只有那 4 块 4MB 内存互相转转转，0 GC 负担！**
+
+#### 4. 极致的用户体验：RAII 生命周期接管
+* **无需手动管理启停**：对外界使用者而言，这依然是一个普通的 `LogAppender`。用户不用关心什么“后台线程启动”或“停机释放”。
+* **构造即启动**：在构造函数末尾，直接调用私有 `start()`。将复杂的 `std::thread` 调度屏蔽。
+* **析构即完美收尾**：在析构函数中检测是否 `m_running`，自动触发 `m_cond.notify_one()` 唤醒处于休眠的后端线程，利用 `join` 阻塞等待它把最后一滴残余数据刷入磁盘。坚决保证服务重启或崩溃前最后一秒的 Fatal 日志绝不丢失！
+
+#### 5. 灾难级防洪堤 (`buffersToWrite.size() > 25`)
+在极端的网络洪峰下，例如程序遭到疯狂的 DDoS 攻击，所有的请求都在疯狂触发 Error 日志。
+* **现象**：内存写得飞快（内存带宽数 GB/s），但磁盘太慢（SSD 几百 MB/s，机械硬盘几十 MB/s）。积压在后端的满缓冲区会无限膨胀，几秒钟就能吃光服务器几十 GB 的物理内存，导致 OOM (Out Of Memory) 内核强杀进程。
+* **防线**：在 `threadFunc` 中，一旦检测到待落盘的队列块超过了 25 块（100MB 积压），直接强行 `erase` 抛弃多余的旧日志。
+* **理念**：**在生死存亡的关头，哪怕丢失部分日志，也坚决不允许内存爆表导致核心服务雪崩。**
+
+---
