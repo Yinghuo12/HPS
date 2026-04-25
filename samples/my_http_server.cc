@@ -3,12 +3,14 @@
 #include "sylar/http/servlet.h"
 
 sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
+sylar::IOManager::ptr worker;
 
 void run() {
     sylar::Address::ptr addr = sylar::Address::LookupAnyIPAddress("0.0.0.0:8020");
 
     // 正确构造函数
-    sylar::http::HttpServer::ptr http_server(new sylar::http::HttpServer(true));
+    sylar::http::HttpServer::ptr http_server(new sylar::http::HttpServer(true, worker.get()));
+    // sylar::http::HttpServer::ptr http_server(new sylar::http::HttpServer(true));
 
     // 正确注册路径（C++11 标准）
     auto sd = http_server->getServletDispatch();
@@ -24,7 +26,8 @@ void run() {
 }
 
 int main() {
-    sylar::IOManager iom(4);
+    sylar::IOManager iom(1);
+    worker.reset(new sylar::IOManager(4, false));
     iom.schedule(run);
     return 0;
 }

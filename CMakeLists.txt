@@ -5,8 +5,13 @@ include(cmake/utils.cmake)  # 引入强制定义宏，修改显示文件为相�
 
 
 set(CMAKE_VERBOSE_MAKEFILE ON) # 打印详细编译信息
-set(CMAKE_CXX_FLAGS "$ENV{CXXFLAGS} -rdynamic -O0 -ggdb -std=c++11 -Wall -Wno-deprecated -Werror -Wno-unused-function -Wno-builtin-macro-redefined")
+set(CMAKE_CXX_FLAGS "$ENV{CXXFLAGS} -rdynamic -O0 -ggdb -std=c++11 -Wall -Wno-deprecated -Werror -Wno-unused-function -Wno-builtin-macro-redefined -Wno-deprecated-declarations -Wno-pessimizing-move")
 
+# SSL库
+find_package(OpenSSL REQUIRED)
+if(OPENSSL_FOUND)
+    include_directories(${OPENSSL_INCLUDE_DIR})
+endif()
 
 # 头文件
 include_directories(.)
@@ -21,6 +26,7 @@ link_directories(./lib)
 set(LIB_SRC
     sylar/log.cc
     sylar/util.cc
+    sylar/util/hash_util.cc
     sylar/config.cc
     sylar/thread.cc
     sylar/fiber.cc
@@ -42,6 +48,10 @@ set(LIB_SRC
     sylar/http/http_session.cc
     sylar/http/http_server.cc
     sylar/http/servlet.cc
+    sylar/http/ws_connection.cc
+    sylar/http/ws_server.cc
+    sylar/http/ws_session.cc
+    sylar/http/ws_servlet.cc
     sylar/http/http_connection.cc
     sylar/uri.rl.cc
     sylar/daemon.cc
@@ -49,13 +59,21 @@ set(LIB_SRC
     sylar/asynclog.cc  # 二次开发异步日志
 )
 
-# ragelmaker(sylar/http/http11_parser.rl LIB_SRC ${CMAKE_CURRENT_SOURCE_DIR}/sylar/http)
-# ragelmaker(sylar/http/httpclient_parser.rl LIB_SRC ${CMAKE_CURRENT_SOURCE_DIR}/sylar/http)
-# ragelmaker(sylar/uri.rl LIB_SRC ${CMAKE_CURRENT_SOURCE_DIR}/sylar)
 
 # 编译库
 add_library(sylar SHARED ${LIB_SRC})
 force_redefine_file_macro_for_sources(sylar) #__FILE__
+
+# 统一链接所有以来库
+set(DEPS_LIBS
+    sylar
+    -lyaml-cpp
+    -lpthread
+    -ldl
+    -lssl
+    -lcrypto
+)
+
 
 
 # 测试程序
@@ -84,83 +102,91 @@ add_executable(test_env tests/test_env.cc)
 add_executable(test_asynclog tests/test_asynclog.cc)  # 二次开发异步日志
 add_executable(echo_server_udp sylar/examples/echo_server_udp.cc)
 add_executable(echo_client_udp sylar/examples/echo_client_udp.cc)
+add_executable(test_ws_server tests/test_ws_server.cc)
+add_executable(test_ws_client tests/test_ws_client.cc)
 
 
 # 链接库
 force_redefine_file_macro_for_sources(test) #__FILE__
-target_link_libraries(test sylar -lyaml-cpp)
+target_link_libraries(test sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_config) #__FILE__
-target_link_libraries(test_config sylar -lyaml-cpp)
+target_link_libraries(test_config sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_thread) #__FILE__
-target_link_libraries(test_thread sylar -lyaml-cpp)
+target_link_libraries(test_thread sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_util) #__FILE__
-target_link_libraries(test_util sylar -lyaml-cpp)
+target_link_libraries(test_util sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_fiber) #__FILE__
-target_link_libraries(test_fiber sylar -lyaml-cpp)
+target_link_libraries(test_fiber sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_scheduler) #__FILE__
-target_link_libraries(test_scheduler sylar -lyaml-cpp)
+target_link_libraries(test_scheduler sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_iomanager) #__FILE__
-target_link_libraries(test_iomanager sylar -lyaml-cpp)
+target_link_libraries(test_iomanager sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_timer) #__FILE__
-target_link_libraries(test_timer sylar -lyaml-cpp)
+target_link_libraries(test_timer sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_hook) #__FILE__
-target_link_libraries(test_hook sylar -lyaml-cpp)
+target_link_libraries(test_hook sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_address) #__FILE__
-target_link_libraries(test_address sylar -lyaml-cpp)
+target_link_libraries(test_address sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_socket) #__FILE__
-target_link_libraries(test_socket sylar -lyaml-cpp)
+target_link_libraries(test_socket sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_bytearray) #__FILE__
-target_link_libraries(test_bytearray sylar -lyaml-cpp)
+target_link_libraries(test_bytearray sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_http) #__FILE__
-target_link_libraries(test_http sylar -lyaml-cpp)
+target_link_libraries(test_http sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_http_parser) #__FILE__
-target_link_libraries(test_http_parser sylar -lyaml-cpp)
+target_link_libraries(test_http_parser sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_tcp_server) #__FILE__
-target_link_libraries(test_tcp_server sylar -lyaml-cpp)
+target_link_libraries(test_tcp_server sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(echo_server) #__FILE__
-target_link_libraries(echo_server sylar -lyaml-cpp)
+target_link_libraries(echo_server sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_http_server) #__FILE__
-target_link_libraries(test_http_server sylar -lyaml-cpp)
+target_link_libraries(test_http_server sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_http_connection) #__FILE__
-target_link_libraries(test_http_connection sylar -lyaml-cpp)
+target_link_libraries(test_http_connection sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_uri) #__FILE__
-target_link_libraries(test_uri sylar -lyaml-cpp)
+target_link_libraries(test_uri sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(my_http_server) #__FILE__
-target_link_libraries(my_http_server sylar -lyaml-cpp)
+target_link_libraries(my_http_server sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_daemon) #__FILE__
-target_link_libraries(test_daemon sylar -lyaml-cpp)
+target_link_libraries(test_daemon sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_env) #__FILE__
-target_link_libraries(test_env sylar -lyaml-cpp)
+target_link_libraries(test_env sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_asynclog) #__FILE__
-target_link_libraries(test_asynclog sylar -lyaml-cpp)
+target_link_libraries(test_asynclog sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(echo_server_udp) #__FILE__
-target_link_libraries(echo_server_udp sylar -lyaml-cpp)
+target_link_libraries(echo_server_udp sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(echo_client_udp) #__FILE__
-target_link_libraries(echo_client_udp sylar -lyaml-cpp)
+target_link_libraries(echo_client_udp sylar ${DEPS_LIBS})
+
+force_redefine_file_macro_for_sources(test_ws_server) #__FILE__
+target_link_libraries(test_ws_server sylar ${DEPS_LIBS})
+
+force_redefine_file_macro_for_sources(test_ws_client) #__FILE__
+target_link_libraries(test_ws_client sylar ${DEPS_LIBS})
 
 # 输出路径
 SET(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)

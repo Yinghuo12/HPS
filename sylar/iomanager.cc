@@ -31,7 +31,13 @@ void IOManager::FdContext::resetContext(EventContext& ctx) {
 
 // 事件触发
 void IOManager::FdContext::triggerEvent(IOManager::Event event) {
+    //SYLAR_LOG_INFO(g_logger) << "fd=" << fd
+    //    << " triggerEvent event=" << event
+    //    << " events=" << events;
     SYLAR_ASSERT(events & event);
+    //if(SYLAR_UNLIKELY(!(event & event))) {
+    //    return;
+    //}
     events = (Event)(events & ~event);
     EventContext& ctx = getContext(event);
     if(ctx.cb) {
@@ -108,7 +114,7 @@ int IOManager::addEvent(int fd, Event event, std::function<void()> cb) {
     }
 
     FdContext::MutexType::Lock lock2(fd_ctx->mutex);
-    if(fd_ctx->events & event) {   // 如果fd_ctx已经注册了该事件，则直接返回，防止有两个不同的线程在操作同一个fd的同一个事件
+    if(SYLAR_UNLIKELY(fd_ctx->events & event)) {   // 如果fd_ctx已经注册了该事件，则直接返回，防止有两个不同的线程在操作同一个fd的同一个事件
         SYLAR_LOG_ERROR(g_logger) << "addEvent assert fd=" << fd << " event=" << event << " fd_ctx.event=" << fd_ctx->events;
         SYLAR_ASSERT(!(fd_ctx->events & event));
     }
@@ -157,7 +163,7 @@ bool IOManager::delEvent(int fd, Event event) {
 
     FdContext::MutexType::Lock lock2(fd_ctx->mutex);
     // 如果fd_ctx没有注册该事件，则直接返回false
-    if(!(fd_ctx->events & event)) {  
+    if(SYLAR_UNLIKELY(!(fd_ctx->events & event))) {  
         return false;
     }
 
@@ -192,7 +198,7 @@ bool IOManager::cancelEvent(int fd, Event event) {
     lock.unlock();
 
     FdContext::MutexType::Lock lock2(fd_ctx->mutex);
-    if(!(fd_ctx->events & event)) {
+    if(SYLAR_UNLIKELY(!(fd_ctx->events & event))) {
         return false;
     }
 
@@ -224,7 +230,7 @@ bool IOManager::cancelAll(int fd) {
     lock.unlock();
 
     FdContext::MutexType::Lock lock2(fd_ctx->mutex);
-    if(!fd_ctx->events) {
+    if(SYLAR_UNLIKELY(!fd_ctx->events)) {
         return false;
     }
 
@@ -260,7 +266,7 @@ IOManager* IOManager::GetThis() {
 }
 
 void IOManager::tickle() {
-    if(hasIdleThreads()) {
+    if(!hasIdleThreads()) {
         return;
     }
     int rt = write(m_tickleFds[1], "T", 1);   // 往管道中写入一个字符（发送消息），唤醒epoll_wait
@@ -279,14 +285,16 @@ bool IOManager::stopping() {
 
 
 void IOManager::idle() {
-    epoll_event* events = new epoll_event[64]();
+    SYLAR_LOG_DEBUG(g_logger) << "IOManager::idle()";
+    const uint64_t MAX_EVENTS = 256;   // 最大事件数
+    epoll_event* events = new epoll_event[MAX_EVENTS]();
     std::shared_ptr<epoll_event> shared_events(events, [](epoll_event* ptr){
         delete[] ptr;
     });
 
     while(true) {
         uint64_t next_timeout = 0;
-        if(stopping(next_timeout)) {
+        if(SYLAR_UNLIKELY(stopping(next_timeout))) {
                 SYLAR_LOG_INFO(g_logger) << "name=" << getName() << " idle stopping exit";
                 break;
             }
@@ -303,7 +311,7 @@ void IOManager::idle() {
             } else  {
                 next_timeout = MAX_TIMEOUT;   // 没有超时时间，则设置为最大超时时间
             }
-            rt = epoll_wait(m_epfd, events, 64, (int)next_timeout); // 如果事件没有触发,则等待next_timeout后也会唤醒,超时返回0
+            rt = epoll_wait(m_epfd, events, MAX_EVENTS, (int)next_timeout); // 如果事件没有触发,则等待next_timeout后也会唤醒,超时返回0
             // SYLAR_LOG_INFO(g_logger) << "epoll_wait rt=" << rt;
         } while (rt < 0 && errno == EINTR);
         
@@ -314,14 +322,17 @@ void IOManager::idle() {
             schedule(cbs.begin(), cbs.end());   // 把定时器回调加入协程队列
             cbs.clear();
         }
+        //if(SYLAR_UNLIKELY(rt == MAX_EVNETS)) {
+        //    SYLAR_LOG_INFO(g_logger) << "epoll wait events=" << rt;
+        //}
 
         for(int i = 0; i < rt; ++i) {
             epoll_event& event = events[i];
             // SYLAR_LOG_INFO(g_logger) << "event=" << event.events; // 打印原始事件值
             if(event.data.fd == m_tickleFds[0]) {  
                 // 如果管道中有数据，则说明有协程需要被唤醒
-                uint8_t dummy;
-                while(read(m_tickleFds[0], &dummy, 1) == 1);  // ET模式，需要把管道中的数据全部读走,必须用while
+                uint8_t dummy[256];
+                while(read(m_tickleFds[0], dummy, sizeof(dummy)) > 0);  // ET模式，需要把管道中的数据全部读走,必须用while
                 continue;
             }
 
@@ -366,13 +377,14 @@ void IOManager::idle() {
                     << rt2 << " (" << errno << ") (" << strerror(errno) << ")";
                 continue;
             }
-
+            
+            // SYLAR_LOG_INFO(g_logger) << " fd=" << fd_ctx->fd << " events=" << fd_ctx->events << " real_events=" << real_events;
             // 分别触发读、写事件
-            if(real_events & READ) {
+            if(fd_ctx->events & READ) {
                 fd_ctx->triggerEvent(READ);
                 --m_pendingEventCount;
             }
-            if(real_events & WRITE) {
+            if(fd_ctx->events & WRITE) {
                 fd_ctx->triggerEvent(WRITE);
                 --m_pendingEventCount;
             }

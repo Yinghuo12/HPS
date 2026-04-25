@@ -17,8 +17,8 @@ public:
               ,sylar::IOManager* accept_woker = sylar::IOManager::GetThis());
     virtual ~TcpServer();
 
-    virtual bool bind(sylar::Address::ptr addr);
-    virtual bool bind(const std::vector<Address::ptr>& addrs, std::vector<Address::ptr>& fails);
+    virtual bool bind(sylar::Address::ptr addr, bool ssl = false);
+    virtual bool bind(const std::vector<Address::ptr>& addrs, std::vector<Address::ptr>& fails, bool ssl = false);
     virtual bool start();
     virtual void stop();
 

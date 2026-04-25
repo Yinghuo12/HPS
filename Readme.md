@@ -104,6 +104,12 @@ ip addr
 打开网页输入 192.168.139.145:8020/yinghuo/123  # ✅ 通配符匹配 
 ~~~
 
+### 1.7 WebSocket测试
+~~~bash
+cd bin
+./test_ws_server
+./test_ws_client  # 另开终端
+~~~
 
 ### 1.6 uri.rl.cc 编译
 
@@ -307,10 +313,77 @@ ab -n 1000000 -c 200  "http://192.168.139.145:80/" # 压测nginx
         1. 演示了使用极简静态工具类 `HttpConnection::DoGet` 发起带超时控制的请求。
         2. 实例化一个连接池（最大连接10，保活30秒，每连接复用5次）。
         3. 启动后台循环定时任务，每秒从池中取连接发起请求。通过观察系统底层 `connect` 调用的频次，完美验证了长连接的保活复用机制以及超期淘汰算法的可靠性。
-
+        
+*   **`test_http_connection.cc` (HTTP 连接池并发互调测试)**
+    *   **功能**：验证作为微服务调用方的 `HttpConnectionPool`。
+    *   **看点**：
+        1. 演示了使用极简静态工具类 `HttpConnection::DoGet` 发起带超时控制的请求。
+        2. 实例化一个连接池（最大连接10，保活30秒，每连接复用5次）。
+        3. 启动后台循环定时任务，每秒从池中取连接发起请求。通过观察系统底层 `connect` 调用的频次，完美验证了长连接的保活复用机制以及超期淘汰算法的可靠性。
+        
 ![test_http_connection_1](./assets/test_http_connection_1.png)
 
 ![test_http_connection_2](./assets/test_http_connection_2.png)
+
+*   **`echo_server_udp.cc` / `echo_client_udp.cc`**
+    * 在 Server 中，调用 `Socket::CreateUDP`，直接 `bind` 端口。因为 UDP 是无连接的，所以没有 `accept` 过程。
+    * 直接将协程扔进 `IOManager` 的池子，开启死循环 `sock->recvFrom(buff, ...)`。
+    * **魔法所在**：虽然写的是看似死循环的同步读代码，但由于 `Socket::recvFrom` 底层已经 Hook 了 `do_io`，只要没有数据到来，当前协程立刻 `Yield` 挂起，把线程交给其它协程处理，完美实现了高并发 UDP 网关。
+
+
+*   **`test_ws_server.cc` &  `test_ws_client.cc` (全双工协程通信)**
+    *   **后端搭建**：实例化 sylar::http::WSServer 监听 8020 端口，通过 addServlet 注册路由 /yinghuo。在 Lambda 处理器中，简单地将收到的 WSFrameMessage 原样发回（Echo回显）。
+    *   **C++ 客户端压测**：调用静态方法 WSConnection::Create 一键升级 HTTP，随后进入 while(true) 循环，狂刷 sendMessage 发送带 Mask 加密的随机乱码包并接收对端响应。
+    *   **前端 Web 测试联调**：
+将下列代码保存为 index.html 并用任意现代浏览器打开
+    *   **测试结果**：打开网页后，前端会瞬间完成 HTTP 到 WebSocket 的 Upgrade，打印出“连接成功”。随后将展示我们的 Sylar 后端解析出前端发来的封包，并将 payload 还原后原路 send 返回浏览器界面的完美结果。
+  ~~~html
+  <!DOCTYPE html>
+  <html>
+  <head>
+      <meta charset="utf-8">
+      <title>WebSocket 测试</title>
+  </head>
+  <body>
+      <h1>连接 WebSocket 服务器</h1>
+      <div id="log"></div>
+
+      <script>
+          // 连接你的服务器
+          var ws = new WebSocket("ws://127.0.0.1:8020/yinghuo");
+
+          ws.onopen = function() {
+              log("✅ 连接成功！");
+              ws.send("我来自浏览器！");
+          };
+
+          ws.onmessage = function(evt) {
+              log("📩 收到消息：" + evt.data);
+          };
+
+          ws.onclose = function() {
+              log("❌ 连接关闭");
+          };
+
+          ws.onerror = function(err) {
+              log("⚠️ 错误：" + err);
+          };
+
+          function log(msg) {
+              document.getElementById("log").innerHTML += msg + "<br>";
+          }
+      </script>
+  </body>
+  </html>
+  ~~~
+
+测试前：
+
+![test_websocket](./assets/test_websocket_error.png)
+
+测试后：
+
+![test_websocket](./assets/test_websocket.png)
 
 -----
 
@@ -3221,3 +3294,259 @@ classDiagram
 * **理念**：**在生死存亡的关头，哪怕丢失部分日志，也坚决不允许内存爆表导致核心服务雪崩。**
 
 ---
+
+## Version 16: UDP 支持与 WebSocket 全栈模块(UDP & WebSocket)
+
+### 版本差异与核心演进亮点
+
+1. **底层加密与哈希工具库 (`hash_util`)**：引入 OpenSSL 底层接口，实现了 MD5、SHA1、SHA256、HMAC 系列哈希算法，以及极其高效的 Murmur3 散列算法和 Base64 编解码器。这是网络安全传输和鉴权的基础。
+2. **UDP 协程化支持**：在 `Socket` 层完善了对 `SOCK_DGRAM` 的支持。结合已有的 `IO Hook` 技术，使 UDP 的 `sendTo` 和 `recvFrom` 能够完美地在协程池中非阻塞调度。
+3. **WebSocket 二进制协议深度解析**：严格遵循 RFC 6455 规范。利用 C/C++ 的位域 (`Bit-fields`) 技术极致压缩内存空间，实现了 WS 协议的握手 (Handshake)、数据分片处理 (Fragmentation)、Ping/Pong 心跳控制以及 XOR 数据掩码加解密。
+4. **WebSocket 客户端与服务端全家桶**：构建了 `WSServer`、`WSSession` 以及 `WSConnection`，并提供了一套独立的动态路由分发器 `WSServletDispatch`，实现了代码极其优雅的全双工消息处理框架。
+
+---
+
+### 模块全量核心类图 (UML)
+
+#### 1. 加密、编码与哈希工具模块 (HashUtil)
+
+```mermaid
+classDiagram
+    class sylar_hash_util {
+        <<namespace>>
+        +murmur3_hash(str: const char*, seed: uint32_t): uint32_t $
+        +murmur3_hash64(str: const char*, seed: uint32_t, seed2: uint32_t): uint64_t $
+        +murmur3_hash(str: const void*, size: uint32_t, seed: uint32_t): uint32_t $
+        +murmur3_hash64(str: const void*, size: uint32_t, seed: uint32_t, seed2: uint32_t): uint64_t $
+        +quick_hash(str: const char*): uint32_t $
+        +quick_hash(str: const void*, size: uint32_t): uint32_t $
+        
+        +base64decode(src: const std::string&): std::string $
+        +base64encode(data: const std::string&): std::string $
+        +base64encode(data: const void*, len: size_t): std::string $
+        
+        +md5(data: const std::string&): std::string $
+        +sha1(data: const std::string&): std::string $
+        +md5sum(data: const std::string&): std::string $
+        +md5sum(data: const void*, len: size_t): std::string $
+        +sha0sum(data: const std::string&): std::string $
+        +sha0sum(data: const void*, len: size_t): std::string $
+        +sha1sum(data: const std::string&): std::string $
+        +sha1sum(data: const void*, len: size_t): std::string $
+        
+        +hmac_md5(text: const std::string&, key: const std::string&): std::string $
+        +hmac_sha1(text: const std::string&, key: const std::string&): std::string $
+        +hmac_sha256(text: const std::string&, key: const std::string&): std::string $
+        
+        +hexstring_from_data(data: const void*, len: size_t, output: char*): void $
+        +hexstring_from_data(data: const void*, len: size_t): std::string $
+        +hexstring_from_data(data: const std::string&): std::string $
+        +data_from_hexstring(hexstring: const char*, length: size_t, output: void*): void $
+        +data_from_hexstring(hexstring: const char*, length: size_t): std::string $
+        +data_from_hexstring(data: const std::string&): std::string $
+        
+        +replace(str: std::string&, find: char, replaceWith: char): void $
+        +replace(str: std::string&, find: char, replaceWith: const std::string&): void $
+        +replace(str: std::string&, find: const std::string&, replaceWith: const std::string&): void $
+        +split(str: const std::string&, delim: char, max: size_t): std::vector~std::string~ $
+        +split(str: const std::string&, delims: const char*, max: size_t): std::vector~std::string~ $
+        
+        +random_string(len: size_t): std::string $
+    }
+```
+
+#### 2. WebSocket 核心数据结构与全局处理函数
+
+```mermaid
+classDiagram
+    class WSOpcode {
+        <<enumeration>>
+        CONTINUE = 0
+        TEXT_FRAME = 1
+        BIN_FRAME = 2
+        CLOSE = 8
+        PING = 0x9
+        PONG = 0xA
+    }
+
+    class WSFrameHead {
+        <<pragma pack(1)>>
+        +opcode: uint32_t : 4
+        +rsv3: bool : 1
+        +rsv2: bool : 1
+        +rsv1: bool : 1
+        +fin: bool : 1
+        +payload: uint32_t : 7
+        +mask: bool : 1
+        
+        +toString(): std::string const
+    }
+    WSFrameHead ..> WSOpcode : 依赖
+
+    class WSFrameMessage {
+        -m_opcode: int
+        -m_data: std::string
+        
+        +WSFrameMessage(opcode: int, data: const std::string&)
+        +getOpcode(): int const
+        +setOpcode(v: int): void
+        +getData(): const std::string& const
+        +getData(): std::string&
+        +setData(v: const std::string&): void
+    }
+
+    class sylar_ws_util {
+        <<global functions>>
+        +WSRecvMessage(stream: Stream*, client: bool): WSFrameMessage::ptr $
+        +WSSendMessage(stream: Stream*, msg: WSFrameMessage::ptr, client: bool, fin: bool): int32_t $
+        +WSPing(stream: Stream*): int32_t $
+        +WSPong(stream: Stream*): int32_t $
+    }
+```
+
+#### 3. WebSocket 服务端与客户端架构
+
+```mermaid
+classDiagram
+    %% ================= Client =================
+    class WSConnection {
+        +WSConnection(sock: Socket::ptr, owner: bool)
+        +Create(url: const std::string&, timeout_ms: uint64_t, headers: const std::map~...~): std::pair~HttpResult::ptr, WSConnection::ptr~ $
+        +Create(uri: Uri::ptr, timeout_ms: uint64_t, headers: const std::map~...~): std::pair~HttpResult::ptr, WSConnection::ptr~ $
+        +recvMessage(): WSFrameMessage::ptr
+        +sendMessage(msg: WSFrameMessage::ptr, fin: bool): int32_t
+        +sendMessage(msg: const std::string&, opcode: int32_t, fin: bool): int32_t
+        +ping(): int32_t
+        +pong(): int32_t
+    }
+
+    %% ================= Server =================
+    class WSSession {
+        +WSSession(sock: Socket::ptr, owner: bool)
+        +handleShake(): HttpRequest::ptr
+        +recvMessage(): WSFrameMessage::ptr
+        +sendMessage(msg: WSFrameMessage::ptr, fin: bool): int32_t
+        +sendMessage(msg: const std::string&, opcode: int32_t, fin: bool): int32_t
+        +ping(): int32_t
+        +pong(): int32_t
+        -handleServerShake(): bool
+        -handleClientShake(): bool
+    }
+
+    class WSServer {
+        #m_dispatch: WSServletDispatch::ptr
+        +WSServer(worker: IOManager*, accept_worker: IOManager*)
+        +getWSServletDispatch(): WSServletDispatch::ptr const
+        +setWSServletDispatch(v: WSServletDispatch::ptr): void
+        #handleClient(client: Socket::ptr): void override
+    }
+
+    %% ================= Servlet =================
+    class WSServlet {
+        <<abstract>>
+        #m_name: std::string
+        +WSServlet(name: const std::string&)
+        +~WSServlet() virtual
+        +handle(request: HttpRequest::ptr, response: HttpResponse::ptr, session: HttpSession::ptr): int32_t override
+        +onConnect(header: HttpRequest::ptr, session: WSSession::ptr): int32_t *
+        +onClose(header: HttpRequest::ptr, session: WSSession::ptr): int32_t *
+        +handle(header: HttpRequest::ptr, msg: WSFrameMessage::ptr, session: WSSession::ptr): int32_t *
+        +getName(): const std::string& const
+    }
+
+    class FunctionWSServlet {
+        #m_callback: callback
+        #m_onConnect: on_connect_cb
+        #m_onClose: on_close_cb
+        +FunctionWSServlet(cb: callback, connect_cb: on_connect_cb, close_cb: on_close_cb)
+        +onConnect(header: HttpRequest::ptr, session: WSSession::ptr): int32_t override
+        +onClose(header: HttpRequest::ptr, session: WSSession::ptr): int32_t override
+        +handle(header: HttpRequest::ptr, msg: WSFrameMessage::ptr, session: WSSession::ptr): int32_t override
+    }
+
+    class WSServletDispatch {
+        +WSServletDispatch()
+        +addServlet(uri: const std::string&, cb: callback, connect_cb: on_connect_cb, close_cb: on_close_cb): void
+        +addGlobServlet(uri: const std::string&, cb: callback, connect_cb: on_connect_cb, close_cb: on_close_cb): void
+        +getWSServlet(uri: const std::string&): WSServlet::ptr
+    }
+
+    WSSession --|> HttpSession
+    WSConnection --|> HttpConnection
+    WSServer --|> TcpServer
+    WSServletDispatch --|> ServletDispatch
+    FunctionWSServlet --|> WSServlet
+    WSServletDispatch "1" *-- "n" WSServlet
+```
+
+---
+
+### 核心实现细节与底层原理深度剖析
+
+#### 1. 密码学与哈希工具模块 (`hash_util`)
+WebSocket 握手协议 (RFC 6455) 中，强制要求服务端必须将客户端传来的 `Sec-WebSocket-Key` 加上一个固定的魔法字符串 `"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"`，进行 **SHA1 散列**，然后再进行 **Base64 编码** 返回。
+
+* **实现细节**：
+  * 我们调用了 `openssl/sha.h` 中的 `SHA1_Init`, `SHA1_Update`, `SHA1_Final` 完成哈希。
+  * 手写了一套高效率的 `base64encode/decode`。核心逻辑是对每 3 个 8 位字节（24 bits）进行重新划分，切成 4 个 6 位字节，并映射到 64 个可见字符字典中；对末尾不足的位数用 `=` 进行 padding 填充。
+  * **Murmur3 算法引入**：在底层代码中加入了 Murmur3，它不用于安全加密，而是由于其极其高效的位移与乘法混合运算 (`fmix32`)，使其成为在哈希表（如缓存服务器的键映射）中性能最高的非加密散列算法之一。
+
+#### 2. WebSocket 二进制数据帧解剖 (`WSFrameHead`)
+WebSocket 不是基于 `\r\n` 的文本协议，而是纯粹的**二进制分帧协议**。
+* **位域优化黑魔法 (`#pragma pack(1)`)**：
+  * 在 C++ 中定义结构体 `WSFrameHead`，使用了 `uint32_t opcode: 4; bool fin: 1;` 这种位域语法。
+  * 这允许我们极其精准地控制这 2 个字节（16 bits）内存的内存布局。配合 `#pragma pack(1)` 禁用编译器的内存对齐，确保我们将这段内存**直接通过指针映射到底层网卡缓冲区的二进制位上**，零拷贝完成协议头解析！
+* **长度扩展机制**：
+  * WS 头中的 `payload` 只有 7 位（最大 127）。
+  * 规则规定：如果解析出的 `payload == 126`，则紧跟其后的 **2 个字节** 才是真实的长度；如果等于 `127`，则紧跟其后的 **8 个字节** 是真实的长度（支持处理上 GB 级别的大文件流）。
+  * **坑点**：网络字节序是大端序。所以我们必须调用上一个版本封装的 `sylar::byteswapOnLittleEndian` 将这 2/8 字节转换为本机的数字。
+
+#### 3. XOR 数据掩码解密 (`WSRecvMessage` / `WSSendMessage`)
+RFC 规定，为了防止 HTTP 代理缓存中毒攻击，**所有从客户端发往服务端的数据帧，都必须被一个 4 字节的随机密钥 (Mask Key) 掩码混淆**。服务端发给客户端则不需要。
+
+* **解密逻辑 (`WSRecvMessage`)**：
+  * 读取包头，判断 `ws_head.mask` 位。
+  * 从流中读取接下来 4 个字节存入 `char mask[4]`。
+  * 读取真实载荷 `data`。
+  * **核心循环还原**：遍历每一个字节 `data[i] ^= mask[i % 4]`。连续的异或操作将数据瞬间还原。
+* **发包逻辑 (`WSSendMessage`)**：
+  * 根据参数 `client` 决定自己是哪一端。如果是客户端发包，现场调用 `rand()` 生成 4 字节的魔法掩码，并对原始字符串执行同样的 `XOR` 混淆后发出。
+
+#### 4. 全双工协议转换：握手与状态切换 (`WSSession::handleShake`)
+* 当一个普通的 HTTP 请求到达 `WSServer::handleClient` 时，先抛给 `WSSession` 处理。
+* 检查请求头 `Sec-webSocket-Version == 13`。提取 `Sec-WebSocket-Key`。
+* 组合魔法字符串 `"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"`，调用 `sha1sum` 和 `base64encode`，构造出 `Sec-WebSocket-Accept`。
+* 将 HTTP 状态码设为 `101 Switching Protocols`。
+* **一旦响应发送完毕，该 Socket 彻底脱离 HTTP 范畴**。`WSServer` 随即进入一个死循环 `while(true) { session->recvMessage(); }`，全权接管这条长连接的二进制帧解析。
+
+#### 5. WSServlet：专为 WebSocket 设计的路由分发器
+普通的 HTTP 只需要处理“请求-响应”一次生命周期。但 WS 是一条持久的长连接。
+* **生命周期三部曲**：
+  在 `WSServlet` 中定义了三个纯虚函数：
+  1. `onConnect`：连接握手成功时触发。可在此时验证用户的 Token。
+  2. `handle`：每次收到对方的 WS 消息帧时触发。
+  3. `onClose`：连接断开或异常时触发，用于清理资源。
+* **Lambda 闭包封装 (`FunctionWSServlet`)**：
+  继承了 HTTP Servlet 的优良传统，支持动态传入三个 `std::function` 闭包，让业务开发者可以像写 Node.js/Python 代码一样，几行代码就拉起一个复杂的全双工 WebSocket 服务。
+
+---
+
+### 单元测试核心分析 (Tests)
+
+#### 1. UDP 协程调度实战 (`echo_server_udp.cc` / `echo_client_udp.cc`)
+* 这是 UDP 非阻塞调度的最佳示范。
+* 在 Server 中，调用 `Socket::CreateUDP`，直接 `bind` 端口。因为 UDP 是无连接的，所以没有 `accept` 过程。
+* 直接将协程扔进 `IOManager` 的池子，开启死循环 `sock->recvFrom(buff, ...)`。
+* **魔法所在**：虽然写的是看似死循环的同步读代码，但由于 `Socket::recvFrom` 底层已经 Hook 了 `do_io`，只要没有数据到来，当前协程立刻 `Yield` 挂起，把线程交给其它协程处理，完美实现了高并发 UDP 网关。
+
+#### 2. WebSocket 全双工通信测试 (`test_ws_server.cc` / `test_ws_client.cc`)
+* **服务端 (`test_ws_server.cc`)**：
+  * 初始化 `WSServer` 监听 8020 端口。
+  * 注册路由 `/yinghuo`。在 `handle` 回调中，接到客户端发来的 `WSFrameMessage` 消息后，原封不动地调用 `session->sendMessage(msg)` 打回去（Echo）。
+* **客户端 (`test_ws_client.cc`)**：
+  * 调用静态发包方法 `WSConnection::Create`，底层的协程会自动进行非阻塞 TCP 握手和 HTTP/1.1 Upgrade 协议升级握手。
+  * **极限分片传输 (Fragmentation) 测试**：
+    为了测试大文件切片传输的组装能力，客户端利用 `for` 循环连续发送 1 块 `fin = false`（未结束）的字符串流。
+    最后发送一块 `fin = true`（帧结束）的报文。
+  * 在服务端底层，`WSRecvMessage` 会在内部缓存循环拼接这些分片，直到遇到 `fin == true`，才完整封装成一个 `WSFrameMessage::ptr` 抛给应用层！
+  * **心跳保活**：底层对 `Opcode == PING` 做了自动拦截拦截，一旦收到 Ping 帧，协程底层直接静默回复一包 `PONG` 帧，使得上层业务完全不用操心心跳包导致的协议污染。

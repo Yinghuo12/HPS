@@ -182,11 +182,12 @@ void Scheduler::run() {
                 // 否则就是找到了一个能在当前线程尝试执行的任务，取出任务并跳出循环（在后面判断是否为死任务）
                 // 下面这几行代码可能会不执行：条件1:任务队列是空的  条件2:队列里有任务，但循环遍历完都没有找到一个能给当前线程执行的协程，is_active 为false，则直接跳出循环，执行后面的空闲协程逻辑
                 ft = *it;
-                m_fibers.erase(it);     // 取出任务
+                m_fibers.erase(it++);     // 取出任务
                 ++m_activeThreadCount;
                 is_active = true;
                 break;
             }
+            tickle_me |= (it != m_fibers.end());   // 如果上面循环遍历完了都没有找到一个能给当前线程执行的协程，则it == m_fibers.end()，tickle_me不变；如果上面循环遍历完了找到了一个能给当前线程执行的协程，则it != m_fibers.end()，tickle_me被置为true，说明有任务但不是当前线程的，需要唤醒其他线程
         }
 
         // 是否需要唤醒其他线程
