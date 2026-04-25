@@ -81,7 +81,10 @@ add_executable(test_uri tests/test_uri.cc)
 add_executable(my_http_server samples/my_http_server.cc)
 add_executable(test_daemon tests/test_daemon.cc)
 add_executable(test_env tests/test_env.cc)
-add_executable(test_asynclog tests/test_asynclog.cc)
+add_executable(test_asynclog tests/test_asynclog.cc)  # 二次开发异步日志
+add_executable(echo_server_udp sylar/examples/echo_server_udp.cc)
+add_executable(echo_client_udp sylar/examples/echo_client_udp.cc)
+
 
 # 链接库
 force_redefine_file_macro_for_sources(test) #__FILE__
@@ -152,6 +155,12 @@ target_link_libraries(test_env sylar -lyaml-cpp)
 
 force_redefine_file_macro_for_sources(test_asynclog) #__FILE__
 target_link_libraries(test_asynclog sylar -lyaml-cpp)
+
+force_redefine_file_macro_for_sources(echo_server_udp) #__FILE__
+target_link_libraries(echo_server_udp sylar -lyaml-cpp)
+
+force_redefine_file_macro_for_sources(echo_client_udp) #__FILE__
+target_link_libraries(echo_client_udp sylar -lyaml-cpp)
 
 # 输出路径
 SET(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)

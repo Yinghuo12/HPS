@@ -20,6 +20,8 @@ Socket::ptr Socket::CreateTCP(sylar::Address::ptr address) {
 
 Socket::ptr Socket::CreateUDP(sylar::Address::ptr address) {
     Socket::ptr sock(new Socket(address->getFamily(), UDP, 0));
+    sock->newSock();
+    sock->m_isConnected = true;
     return sock;
 }
 
@@ -30,6 +32,8 @@ Socket::ptr Socket::CreateTCPSocket() {
 
 Socket::ptr Socket::CreateUDPSocket() {
     Socket::ptr sock(new Socket(IPv4, UDP, 0));
+    sock->newSock();
+    sock->m_isConnected = true;
     return sock;
 }
 
@@ -40,6 +44,8 @@ Socket::ptr Socket::CreateTCPSocket6() {
 
 Socket::ptr Socket::CreateUDPSocket6() {
     Socket::ptr sock(new Socket(IPv6, UDP, 0));
+    sock->newSock();
+    sock->m_isConnected = true;
     return sock;
 }
 
@@ -155,7 +161,7 @@ bool Socket::bind(const Address::ptr addr) {
     }
     // ::指的是全局作用域，调用系统的bind函数而不是递归调用自己
     if(::bind(m_sock, addr->getAddr(), addr->getAddrLen())) {
-        SYLAR_LOG_ERROR(g_logger) << "bind error errrno=" << errno
+        SYLAR_LOG_ERROR(g_logger) << "bind error errno=" << errno
             << " errstr=" << strerror(errno);
         return false;
     }
