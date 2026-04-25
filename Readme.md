@@ -104,14 +104,14 @@ ip addr
 打开网页输入 192.168.139.145:8020/yinghuo/123  # ✅ 通配符匹配 
 ~~~
 
-### 1.7 WebSocket测试
+### 1.6 WebSocket测试
 ~~~bash
 cd bin
 ./test_ws_server
 ./test_ws_client  # 另开终端
 ~~~
 
-### 1.6 uri.rl.cc 编译
+### 1.7 uri.rl.cc 编译
 
 ~~~bash
 # 1. 把uri.h uri.rl 放在 sylar 目录下
@@ -126,7 +126,7 @@ cd sylar
 ragel -G2 -C uri.rl -o uri.rl.cc
 ~~~
 
-### 1.7 项目构建与测试
+### 1.8 项目构建与测试
 
 ~~~bash
 cd sylar/build
@@ -136,7 +136,7 @@ cd ../bin
 ./test_xxx
 ~~~
 
-### 1.8 压力测试
+### 1.9 压力测试
 ~~~bash
 sudo apt install apache2-utils  # 压力测试工具
 ab -V
@@ -157,7 +157,7 @@ ab -n 1000000 -c 200  "http://192.168.139.145:80/" # 压测nginx
 ![alt text](./assets/stress_test_mine_2.png)
 ![alt text](./assets/stress_test_nginx_2.png )
 
-### 1.9 启动参数解析、环境变量
+### 1.10 启动参数解析、环境变量
 利用/proc/pid/cmdline 和全局变量构造函数，实现在进入main函数前解析参数
 1. 读写环境变量
 2. 获取程序的绝对路径，基于绝对路径设置cwd
@@ -166,7 +166,7 @@ ab -n 1000000 -c 200  "http://192.168.139.145:80/" # 压测nginx
 ./test_env [-s] [-d] [-p]  # -s:start with the terminal  -d:run as daemon -p:print help
 ~~~
 
-### 1.10 双缓冲异步日志模块与压测
+### 1.11 双缓冲异步日志模块与压测
 
 通过运行编译后的 `test_asynclog`，发起了 4 线程 × 25 万次 = **1,000,000 条** 高并发日志写入请求：
 
