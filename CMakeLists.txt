@@ -17,6 +17,7 @@ endif()
 include_directories(.)
 include_directories(./include)
 include_directories(./include/boost)
+include_directories(/usr/include/jsoncpp)
 
 # 库目录
 link_directories(./lib)
@@ -57,6 +58,7 @@ set(LIB_SRC
     sylar/daemon.cc
     sylar/env.cc
     sylar/asynclog.cc  # 二次开发异步日志
+    sylar/util/json_util.cc
 )
 
 
@@ -72,6 +74,7 @@ set(DEPS_LIBS
     -ldl
     -lssl
     -lcrypto
+    -ljsoncpp
 )
 
 
@@ -104,6 +107,7 @@ add_executable(echo_server_udp sylar/examples/echo_server_udp.cc)
 add_executable(echo_client_udp sylar/examples/echo_client_udp.cc)
 add_executable(test_ws_server tests/test_ws_server.cc)
 add_executable(test_ws_client tests/test_ws_client.cc)
+add_executable(chat_room chat/chat_main.cc chat/protocol.cc chat/resource_servlet.cc chat/chat_servlet.cc)
 
 
 # 链接库
@@ -187,6 +191,9 @@ target_link_libraries(test_ws_server sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_ws_client) #__FILE__
 target_link_libraries(test_ws_client sylar ${DEPS_LIBS})
+
+force_redefine_file_macro_for_sources(chat_room) #__FILE__
+target_link_libraries(chat_room sylar ${DEPS_LIBS})
 
 # 输出路径
 SET(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)

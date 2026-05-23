@@ -1,4 +1,5 @@
-# 高性能服务器
+# 基于WebSocket的多人聊天室
+![chat_room](./assets/chat_room.gif)
 
 ### 仓库git操作
 
@@ -385,7 +386,34 @@ ab -n 1000000 -c 200  "http://192.168.139.145:80/" # 压测nginx
 
 ![test_websocket](./assets/test_websocket.png)
 
+### 2.6. 聊天室测试
+
+~~~bash
+# 1. 构建
+cd build
+cmake ..
+make chat_room -j4
+
+# 2. 启动聊天室服务器
+cd ../bin
+./chat_room
+
+# 3. 访问
+# HTTP 页面: http://<你的IP>:8090/html/index.html
+# WebSocket: ws://<你的IP>:8072/sylar/chat
+# HTTP 页面: http://192.168.139.145:8090/html/index.html
+# WebSocket: ws://192.168.139.145:8072/sylar/chat
+
+
+# HTTP 页面: http://127.0.0.1:8090/html/index.html
+# WebSocket: ws://127.0.0.1:8072/sylar/chat
+
+# 4. 打开多个浏览器窗口，输入不同昵称登录即可开始聊天
+~~~
 -----
+![chat_room1](./assets/chat_room1.png)
+
+![chat_room2](./assets/chat_room2.png)
 
 ## Version 1 : 日志系统 和 配置系统 (Log & Configuration)
 
@@ -3550,3 +3578,82 @@ RFC 规定，为了防止 HTTP 代理缓存中毒攻击，**所有从客户端�
     最后发送一块 `fin = true`（帧结束）的报文。
   * 在服务端底层，`WSRecvMessage` 会在内部缓存循环拼接这些分片，直到遇到 `fin == true`，才完整封装成一个 `WSFrameMessage::ptr` 抛给应用层！
   * **心跳保活**：底层对 `Opcode == PING` 做了自动拦截拦截，一旦收到 Ping 帧，协程底层直接静默回复一包 `PONG` 帧，使得上层业务完全不用操心心跳包导致的协议污染。
+
+---
+
+## Version 17: 聊天室 (Chat Room)
+
+基于已完成的 WebSocket 全双工通信框架，Version 17 实现了一个完整的多人实时聊天室应用，复刻了原作者 sylar 的 chat_room 功能。
+
+### 架构概述
+
+聊天室采用双服务器架构：
+- **HTTP 服务器 (端口 8090)**：通过 `ResourceServlet` 提供静态 HTML 聊天页面
+- **WebSocket 服务器 (端口 8072)**：通过 `ChatWSServlet` 处理实时聊天消息
+
+### 新增文件
+
+```
+chat/
+├── chat_main.cc           # 聊天室主入口，启动 HTTP 和 WS 双服务器
+├── protocol.h / protocol.cc    # JSON 聊天协议 (ChatMessage)
+├── chat_servlet.h / chat_servlet.cc  # WebSocket 聊天 Servlet
+└── resource_servlet.h / resource_servlet.cc  # 静态文件服务 Servlet
+sylar/util/
+└── json_util.h / json_util.cc   # JSON 工具类 (依赖 jsoncpp)
+bin/html/
+└── index.html             # 聊天室前端页面
+bin/conf/
+├── server.yml             # 服务器配置 (HTTP + WS 端口)
+└── worker.yml             # Worker 线程配置
+```
+
+### 聊天协议设计
+
+基于 JSON 的轻量级消息协议：
+
+| 消息类型 | 方向 | 说明 |
+|---------|------|------|
+| `login_request` | Client → Server | 登录请求 (携带 `name`) |
+| `login_response` | Server → Client | 登录响应 (`result` + `msg`) |
+| `send_request` | Client → Server | 发送消息 (携带 `msg`) |
+| `send_response` | Server → Client | 发送响应 |
+| `user_enter` | Server → 所有 | 用户加入通知 |
+| `user_leave` | Server → 所有 | 用户离开通知 |
+| `msg` | Server → 除发送者 | 聊天消息广播 |
+
+### 核心功能实现
+
+#### 1. 会话管理 (`chat_servlet.cc`)
+- 使用 `std::map<string, WSSession::ptr>` 维护在线用户映射
+- `RWMutex` 读写锁保护并发访问
+- 支持：登录校验（用户名判空/重名）、消息广播、用户进入/离开通知
+
+#### 2. JSON 工具 (`json_util.h/cc`)
+- 封装 jsoncpp 的 `Json::Reader` / `Json::FastWriter`
+- 提供 `FromString()` 和 `ToString()` 静态方法
+- 支持类型安全的值提取（GetInt32, GetString 等）
+
+#### 3. 静态文件服务 (`resource_servlet.cc`)
+- 通配符路由 `/html/*` 匹配
+- 路径安全检查（拒绝 `..` 路径穿越）
+- 设置正确的 `Content-Type: text/html;charset=utf-8`
+
+### 聊天室测试
+
+~~~bash
+# 1. 构建
+cd build
+cmake ..
+make chat_room -j4
+
+# 2. 启动聊天室服务器
+cd ../bin
+./chat_room
+
+# 3. 访问
+# HTTP 页面: http://<你的IP>:8090/html/index.html
+# WebSocket: ws://<你的IP>:8072/sylar/chat
+
+# 4. 打开多个浏览器窗口，输入不同昵称登录即可开始聊天
+~~~
