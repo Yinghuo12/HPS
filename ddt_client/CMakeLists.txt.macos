@@ -1,0 +1,94 @@
+cmake_minimum_required(VERSION 3.5)
+project(ddt_client)
+
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_VERBOSE_MAKEFILE ON)
+set(CMAKE_CXX_FLAGS "-O0 -ggdb -std=c++11 -Wall -Wno-deprecated -Wno-unused-function -Wno-deprecated-declarations -DIMGUI_IMPL_OPENGL_LOADER_GLAD")
+
+# OpenGL / GLFW
+set(OpenGL_GL_PREFERENCE GLVND)
+find_package(OpenGL REQUIRED)
+find_package(glfw3 REQUIRED)
+
+# Protobuf
+find_package(Protobuf REQUIRED)
+
+# GLM (header-only, try pkg-config then fallback)
+find_package(PkgConfig)
+if(PkgConfig_FOUND)
+    pkg_check_modules(GLM QUIET glm)
+endif()
+if(NOT GLM_FOUND)
+    find_path(GLM_INCLUDE_DIR glm/glm.hpp HINTS /usr/local/include /opt/homebrew/include)
+    if(GLM_INCLUDE_DIR)
+        set(GLM_FOUND TRUE)
+        include_directories(${GLM_INCLUDE_DIR})
+    endif()
+endif()
+
+# 头文件
+include_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/thirdparty/glad/include
+    ${CMAKE_SOURCE_DIR}/thirdparty/stb
+    ${CMAKE_SOURCE_DIR}/thirdparty/nlohmann
+    ${CMAKE_SOURCE_DIR}/thirdparty/imgui
+    ${CMAKE_SOURCE_DIR}/thirdparty/imgui/backends
+    ${CMAKE_BINARY_DIR}/ddt/proto
+)
+
+# 第三方源文件
+set(GLAD_SRC ${CMAKE_SOURCE_DIR}/thirdparty/glad/src/glad.c)
+
+# ImGui
+set(IMGUI_SRC
+    ${CMAKE_SOURCE_DIR}/thirdparty/imgui/imgui.cpp
+    ${CMAKE_SOURCE_DIR}/thirdparty/imgui/imgui_draw.cpp
+    ${CMAKE_SOURCE_DIR}/thirdparty/imgui/imgui_tables.cpp
+    ${CMAKE_SOURCE_DIR}/thirdparty/imgui/imgui_widgets.cpp
+    ${CMAKE_SOURCE_DIR}/thirdparty/imgui/imgui_demo.cpp
+    ${CMAKE_SOURCE_DIR}/thirdparty/imgui/backends/imgui_impl_glfw.cpp
+    ${CMAKE_SOURCE_DIR}/thirdparty/imgui/backends/imgui_impl_opengl3.cpp
+)
+
+# Protobuf 生成目录
+set(DDT_PB_DIR ${CMAKE_BINARY_DIR}/ddt/proto)
+
+# macOS portable client sources (no sylar)
+set(CLIENT_SRC
+    src/main.cc
+    src/game.cc
+    src/shader.cc
+    src/texture.cc
+    src/resource_manager.cc
+    src/sprite_renderer.cc
+    src/game_object.cc
+    src/terrain.cc
+    src/projectile.cc
+    src/text_renderer.cc
+    src/ws_client.cc
+    src/network_client_portable.cc
+    ${DDT_PB_DIR}/ddt.pb.cc
+    ${IMGUI_SRC}
+    ${GLAD_SRC}
+)
+
+add_executable(ddt_client ${CLIENT_SRC})
+set_target_properties(ddt_client PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin
+)
+
+# game.cc includes network_client.h — we provide a portable version
+# by copying the portable header over the original at build time
+add_custom_command(TARGET ddt_client PRE_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/network_client_portable.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/network_client.h
+    COMMENT "Using portable network_client.h (no sylar)"
+)
+
+target_link_libraries(ddt_client
+    OpenGL::GL
+    glfw
+    protobuf
+)

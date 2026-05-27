@@ -1,7 +1,613 @@
-# 基于WebSocket的多人聊天室
+# 基于高性能协程服务器的仿弹弹堂游戏 v0.1
+## 项目简介
+学习和兴趣爱好，基于sylar协程服务器框架，实现一个仿弹弹堂游戏。
+
+服务端：C++ sylar协程服务器
+
+客户端：OpenGL
+
+## 展示
+UI界面
+![ddt_ui](assets/ddt_ui.png)
+
+房间界面
+![ddt_room](assets/ddt_room.png)
+
+大厅界面
+![ddt_lobby](assets/ddt_lobby.png)
+
+聊天界面
+![ddt_chat](assets/ddt_chat.png)
+
+战斗界面
+![ddt_game](assets/ddt_game.png)
+
+## 使用资源和鸣谢
+1. [sylar](https://github.com/sylar-yin/sylar) 协程服务器框架
+2. [Alpha](https://www.github.com/AlphaMinZ/Alpha) 基于sylar的RPC模块
+3. [DDT](https://github.com/iwxyi/DDT) 弹弹堂素材和灵感
+4. 特别鸣谢：[Claude Code] & [GLM Coding Plan]
+
+## 后记
+能力有限，学习了sylar后，一边AI Coding一边学习，代码可能有很多问题，欢迎指正。
+
+## 新分支git提交命令
+~~~bash
+# 普通提交
+git checkout ddt
+git add .
+git commit -m "xxx"
+git push origin ddt
+
+# 撤销并重新提交
+git reset --soft HEAD~
+git add .
+git commit -m "xxx"
+git push origin ddt --force
+
+~~~
+
+---
+
+# DDT — 项目文档
+
+## 目录
+
+- [1. 项目概述](#1-项目概述)
+- [2. 技术选型](#2-技术选型)
+- [3. 项目架构](#3-项目架构)
+- [4. 通信协议](#4-通信协议)
+- [5. 服务端](#5-服务端)
+- [6. 客户端](#6-客户端)
+- [7. RPC 框架](#7-rpc-框架)
+- [8. 构建与部署](#8-构建与部署)
+- [9. 测试指南](#9-测试指南)
+
+---
+
+## 1. 项目概述
+
+DDT（弹弹堂）是一款基于 C/S 架构的实时多人回合制弹道射击游戏。玩家在同一张地形图上轮流发射炮弹，考虑风向和角度，击中对手以减少其 HP，率先将对方 HP 降为零者获胜。
+
+项目基于 sylar C++ 协程框架构建服务端，客户端使用 OpenGL 3.3 渲染，通过 WebSocket 进行实时通信。整体分为服务端（gate/lobby/match/battle 四层）和客户端（逻辑层/渲染层/网络层）两大模块，附带一套基于 Protobuf + ZooKeeper 的 RPC 框架。
+
+---
+
+## 2. 技术选型
+
+### 2.1 服务端
+
+| 组件 | 技术 | 用途 |
+|------|------|------|
+| 框架 | sylar | C++ 协程框架，提供 IOManager、TcpServer、WebSocket、日志、配置等基础设施 |
+| 序列化 | Protobuf | 游戏协议定义与序列化 |
+| 通信 | WebSocket | 双向实时通信 |
+| 数据库 | MySQL | 账号、玩家资料、聊天记录、对战记录、好友关系持久化 |
+| 缓存 | Redis | 会话 token、在线状态、房间缓存 |
+| 配置 | YAML | 游戏参数配置（物理、地形、战斗） |
+| 服务发现 | ZooKeeper | RPC 服务注册与发现 |
+| 构建 | CMake + Make | 编译构建 |
+
+### 2.2 客户端
+
+| 组件 | 技术 | 用途 |
+|------|------|------|
+| 窗口/输入 | GLFW | 跨平台窗口管理与输入事件 |
+| 渲染 | OpenGL 3.3 Core | 2D 精灵渲染、地形渲染、粒子效果 |
+| 文字 | FreeType | 中文文字渲染 |
+| 贴图 | stb_image | PNG 纹理加载 |
+| 数学 | GLM | 矩阵变换、正交投影 |
+| UI | ImGui | 游戏界面面板（登录、房间、聊天等） |
+| 网络 | libwebsocket / 原生 Socket | WebSocket 客户端连接 |
+| UI 集成 | ImGui + GLFW + OpenGL3 | ImGui 后端绑定 |
+
+### 2.3 选型理由
+
+- **sylar 框架**：基于协程的异步 IO，单线程即可处理大量并发连接，适合游戏服务端
+- **WebSocket**：浏览器级双向通信协议，穿透防火墙能力强，客户端实现简单
+- **Protobuf**：强类型 schema，自动生成序列化代码，向后兼容
+- **OpenGL**：跨平台图形 API，精灵批量渲染性能优异
+- **FreeType**：支持 CJK 字符渲染，弹弹堂需要中文 UI
+
+---
+
+## 3. 项目架构
+
+### 3.1 目录结构
+
+```
+sylar/
+├── sylar/                       # sylar 框架源码
+│   ├── log.h/.cc                # 日志系统
+│   ├── fiber.h/.cc              # 协程
+│   ├── iomanager.h/.cc          # IO 调度器
+│   ├── tcp_server.h/.cc         # TCP 服务器
+│   ├── http/ws_server.h/.cc     # WebSocket 服务器
+│   ├── config.h/.cc             # 配置系统
+│   └── rpc/                     # RPC 框架扩展
+│       ├── rpc_provider.h/.cc   # RPC 服务端
+│       ├── rpc_channel.h/.cc    # RPC 客户端通道
+│       ├── rpc_controller.h/.cc # RPC 控制器
+│       └── rpcheader.proto      # RPC 协议头
+├── ddt_server/                  # DDT 游戏服务端
+│   ├── gate/                    # 网关层（入口 + 路由）
+│   ├── lobby/                   # 大厅层（认证 + 聊天）
+│   ├── match/                   # 匹配层（房间 + 玩家管理）
+│   ├── battle/                  # 战斗层（物理引擎）
+│   ├── common/                  # 共享配置
+│   ├── db/                      # 数据库操作
+│   ├── conf/                    # 配置文件
+│   └── schema.sql               # 数据库建表脚本
+├── ddt_client/                  # DDT 游戏客户端
+│   ├── logic/                   # 游戏逻辑
+│   ├── render/                  # 渲染引擎
+│   ├── network/                 # 网络通信
+│   ├── battle/                  # 战斗相关
+│   ├── ui/                      # UI 界面
+│   ├── common/                  # 共享工具
+│   ├── shaders/                 # GLSL 着色器
+│   ├── assets/                  # 纹理贴图
+│   └── cmake/                   # 构建模块
+├── rpc_test/                    # RPC 测试代码
+├── proto/                       # Protobuf 协议定义
+├── scripts/                     # 构建/发布脚本
+├── docs/                        # 文档
+├── framework/                   # sylar 依赖头文件
+└── CMakeLists.txt               # 根构建文件
+```
+
+### 3.2 系统架构图
+
+```
+┌──────────────┐    WebSocket    ┌──────────────────────────────────┐
+│  DDT Client  │ ◄────────────► │          DDT Server              │
+│  (OpenGL)    │                 │                                  │
+│              │                 │  ┌─────────┐   ┌──────────────┐  │
+│  - GLFW      │                 │  │  Gate   │──►│    Lobby     │  │
+│  - SpriteBatch│                │  │ (入口)  │   │ (认证/聊天)  │  │
+│  - ImGui     │                 │  └─────────┘   └──────┬───────┘  │
+│  - FreeType  │                 │                       │          │
+└──────────────┘                 │  ┌─────────────┐  ┌──▼────────┐ │
+                                 │  │   Battle    │◄─┤  Match    │ │
+                                 │  │ (物理引擎) │  │ (房间)    │ │
+                                 │  └──────┬──────┘  └───────────┘ │
+                                 │         │                       │
+                                 │  ┌──────▼──────┐                │
+                                 │  │  MySQL/Redis │                │
+                                 │  └─────────────┘                │
+                                 └──────────────────────────────────┘
+```
+
+---
+
+## 4. 通信协议
+
+### 4.1 Protobuf 定义
+
+协议定义在 `proto/ddt.proto`，使用 `oneof payload` 实现多态消息：
+
+```protobuf
+message GameMessage {
+  oneof payload {
+    LoginRequest       login_request       = 1;
+    LoginResponse      login_response      = 2;
+    JoinRoomRequest    join_room_request   = 3;
+    // ... 40+ 消息类型
+  }
+}
+```
+
+### 4.2 消息分类
+
+| 类别 | 消息 | 说明 |
+|------|------|------|
+| **账号** | Login / Register | 登录注册 |
+| **房间** | JoinRoom / CreateRoom / RoomList / LeaveRoom / Ready / SwitchTeam | 房间管理 |
+| **战斗** | TurnStart / Shoot / ShootResult / Move / GameOver | 回合制战斗 |
+| **聊天** | Chat / ChatHistory / PrivateChat | 多频道聊天 |
+| **好友** | FriendAdd / FriendList | 好友系统 |
+| **通知** | Error / ServerShutdown / OpponentLeft | 系统通知 |
+
+### 4.3 战斗数据流
+
+```
+TurnStartNotify (服务端 → 双方)
+  ├── turn_player_id: 当前回合玩家
+  ├── wind: 风力值
+  └── turn_number: 回合数
+
+ShootRequest (当前玩家 → 服务端)
+  ├── angle: 发射角度
+  └── force: 发射力度
+
+ShootResultNotify (服务端 → 双方)
+  ├── shooter_id: 射手 ID
+  ├── points[]: 弹道轨迹点 (x, y, t)
+  ├── hit_x, hit_y: 落点坐标
+  ├── hit_player: 是否命中玩家
+  ├── damage: 伤害值
+  ├── damage_type: NORMAL / CRITICAL / BLOCK
+  └── updated_player1/2: 更新后的玩家状态
+```
+
+---
+
+## 5. 服务端
+
+### 5.1 分层架构
+
+#### Gate 层（`ddt_server/gate/`）
+
+- `ddt_main.cc`：服务端入口，初始化 IOManager、数据库、房间管理器，启动 WebSocket 服务器
+- `ddt_servlet.h/.cc`：消息路由，解析 `GameMessage`，根据 `oneof payload` 分发到对应处理器
+
+#### Lobby 层（`ddt_server/lobby/`）
+
+- `ddt_auth.h/.cc`：账号认证，登录/注册处理，密码加盐哈希，token 生成与验证
+- `ddt_chat_manager.h/.cc`：聊天管理，支持 Team/All/Room/World/System/Broadcast/Private 七个频道，聊天记录持久化
+
+#### Match 层（`ddt_server/match/`）
+
+- `ddt_room_manager.h/.cc`：房间管理，创建/销毁/列表/匹配，房间状态机
+- `ddt_game_room.h/.cc`：单个房间逻辑，玩家加入/离开/准备/切换队伍，游戏开始触发
+- `ddt_player.h/.cc`：玩家数据，HP/位置/角度/方向/状态
+
+#### Battle 层（`ddt_server/battle/`）
+
+- `ddt_physics.h/.cc`：物理引擎，弹道模拟（重力+风力+空气阻力），地形碰撞检测，伤害计算
+
+#### Common 层（`ddt_server/common/`）
+
+- `ddt_config.h/.cc`：配置加载，从 `conf/game.yml` 读取物理参数、游戏规则、服务器配置
+
+#### DB 层（`ddt_server/db/`）
+
+- `ddt_database.h/.cc`：MySQL 连接池，CRUD 操作封装
+
+### 5.2 物理引擎
+
+弹道模拟参数（`conf/game.yml`）：
+
+```yaml
+physics:
+  air_factor: 0.89927083      # 空气阻力系数
+  wind_factor: 5.8709153      # 风力系数
+  gravity_factor: -172.06527992  # 重力
+  force_factor: 41.0          # 力度系数
+  dt: 0.01                    # 模拟步长
+```
+
+弹道方程（每帧）：
+```
+vx *= air_factor
+vx += wind * wind_factor * dt
+vy += gravity * dt
+x  += vx * dt
+y  += vy * dt
+```
+
+### 5.3 数据库
+
+`schema.sql` 定义 5 张表：
+
+| 表 | 用途 |
+|----|------|
+| `accounts` | 账号（用户名、密码哈希、盐） |
+| `player_profiles` | 玩家资料（昵称、等级、经验、胜败） |
+| `chat_history` | 聊天记录（频道、发送者、内容、时间） |
+| `game_records` | 对战记录 |
+| `friends` | 好友关系 |
+
+---
+
+## 6. 客户端
+
+### 6.1 模块划分
+
+#### 逻辑层（`ddt_client/logic/`）
+
+| 文件 | 职责 |
+|------|------|
+| `game.h/.cc` | 游戏主循环：初始化、渲染、输入、状态管理、网络消息处理 |
+| `game_object.h/.cc` | 游戏对象基类（位置、大小、旋转、颜色、纹理） |
+| `projectile.h/.cc` | 弹道物体：根据服务端轨迹点插值渲染飞行弹丸 |
+
+#### 渲染层（`ddt_client/render/`）
+
+| 文件 | 职责 |
+|------|------|
+| `shader.h/.cc` | GLSL 着色器编译、链接、uniform 设置 |
+| `texture.h/.cc` | OpenGL 纹理封装：生成、绑定、格式设置 |
+| `resource_manager.h/.cc` | 全局资源管理：Shader/Texture 按名称缓存，路径自动检测 |
+| `sprite_renderer.h/.cc` | 单精灵渲染器 |
+| `sprite_batch.h/.cc` | 批量精灵渲染：按纹理排序合并 draw call，6 顶点/精灵 |
+| `terrain.h/.cc` | 地形渲染：高度图生成、地形线段绘制、爆炸破坏 |
+| `text_renderer.h/.cc` | FreeType 文字渲染：加载字体、渲染中文文本 |
+| `camera.h/.cc` | 摄像机系统：跟随玩家/弹道，右键拖拽平移 |
+
+#### 网络层（`ddt_client/network/`）
+
+| 文件 | 职责 |
+|------|------|
+| `ws_client.h/.cc` | WebSocket 客户端：连接、发送、接收 |
+| `network_client.h/.cc` | 网络客户端：Protobuf 序列化/反序列化，消息回调分发 |
+
+### 6.2 渲染流程
+
+```
+Begin(projection)
+  ├── 绘制背景（bg_rainbow / bg_ghost）
+  ├── 绘制地形（Terrain::Draw）
+  ├── 绘制玩家精灵（SpriteBatch::Draw × 2）
+  ├── 绘制弹道（Projectile::Draw）
+  ├── 绘制爆炸效果
+  └── 绘制 UI（ImGui）
+End()
+  └── flush() — 按纹理排序，合并 draw call
+```
+
+### 6.3 摄像机模式
+
+| 模式 | 行为 |
+|------|------|
+| INTRO | 开场镜头 |
+| FOLLOW_TURN | 跟随当前回合玩家 |
+| FOLLOW_PROJ | 跟随飞行中的弹丸 |
+| MANUAL | 右键拖拽自由平移 |
+
+### 6.4 坐标系统
+
+使用 Y 轴向下的正交投影：
+
+```cpp
+glm::ortho(left, right, bottom, top, near, far)
+// bottom > top → Y 轴向下
+```
+
+纹理加载不翻转（`stbi_set_flip_vertically_on_load` 设为 false），与 Y-down 投影配合直接映射。
+
+### 6.5 纹理资源
+
+共 36 张 PNG 纹理，存放在 `ddt_client/assets/`：
+
+| 类别 | 文件 | 尺寸 |
+|------|------|------|
+| 角色 | player1.png, player1_r.png, player2.png, player2_r.png, role.png, role_r.png, role2.png, role2_r.png | 40×40 ~ 40×59 |
+| 武器 | tri_darts, ice_cream 及其 _r/_bomb 变体, projectile 及其 _r/_bomb 变体 | 30×30 ~ 40×40 |
+| 效果 | bow0-3, explosion0-3, bomb, fly, flyAttack, flyAttack_r | 40×40 ~ 80×80 |
+| 背景 | bg_rainbow, bg_ghost | 1000×600 |
+| 启动画面 | bg_start | 1000×657 |
+
+资源路径自动检测（`findAssetBase()`）：运行时依次尝试 `assets/`、`ddt_client/assets/`、`../ddt_client/assets/`、`../../ddt_client/assets/`。
+
+### 6.6 着色器
+
+`shaders/sprite.vert` / `shaders/sprite.frag`：OpenGL 3.33 Core Profile，顶点着色器完成 model × projection 变换，片段着色器进行纹理采样与颜色混合。
+
+---
+
+## 7. RPC 框架
+
+在 sylar 框架基础上扩展了一套基于 Protobuf + ZooKeeper 的 RPC 框架，位于 `sylar/rpc/`。
+
+### 7.1 架构
+
+```
+Caller (客户端)                          Callee (服务端)
+    │                                        │
+    │  RpcChannel.CallMethod()               │  RpcProvider
+    │  ├── ZK 查找服务地址                    │  ├── notifyService()
+    │  ├── 序列化请求                         │  ├── ZK 注册服务
+    │  ├── Socket 连接                        │  └── handleClient()
+    │  └── 发送/接收                          │      ├── 解析 RpcHeader
+    │                                        │      ├── 查找 method
+    │  <──── TCP ────>                        │      └── CallMethod()
+```
+
+### 7.2 线路协议
+
+```
+请求: [4字节 header_size (网络序)][RpcHeader protobuf][args protobuf]
+响应: [4字节 response_size (网络序)][response protobuf]
+```
+
+### 7.3 ZooKeeper 路径
+
+服务注册路径：`/${service_name}/${method_name}`，节点数据为 `host:port`。
+
+### 7.4 测试
+
+测试代码在 `rpc_test/`：
+
+```bash
+# 编译
+bash scripts/build.sh rpc
+
+# 启动 ZooKeeper
+sudo systemctl start zookeeper
+
+# 启动服务端
+./bin/rpc_test_callee
+
+# 运行客户端
+./bin/rpc_test_caller
+```
+
+---
+
+## 8. 构建与部署
+
+### 8.1 环境依赖
+
+**服务端（Linux）：**
+```bash
+sudo apt install -y build-essential cmake protobuf-compiler \
+  libmysqlclient-dev libredis-dev libyaml-cpp-dev \
+  libzookeeper-mt-dev zookeeper
+```
+
+**客户端（Linux）：**
+```bash
+sudo apt install -y build-essential cmake \
+  libglfw3-dev libfreetype-dev libgl1-mesa-dev
+```
+
+**客户端（macOS）：**
+```bash
+xcode-select --install
+brew install glfw freetype protobuf
+```
+
+### 8.2 构建
+
+统一构建脚本 `scripts/build.sh`：
+
+```bash
+cd /path/to/sylar
+
+# 构建服务端
+bash scripts/build.sh server
+
+# 构建客户端（需图形环境）
+bash scripts/build.sh client
+
+# 构建全部
+bash scripts/build.sh all
+
+# 构建 RPC 测试
+bash scripts/build.sh rpc
+
+# 清理
+bash scripts/build.sh clean
+```
+
+### 8.3 数据库初始化
+
+```bash
+mysql -u root -p < ddt_server/schema.sql
+```
+
+需在 `ddt_server/conf/game.yml` 中配置数据库连接信息。
+
+### 8.4 发布打包
+
+```bash
+# 打包客户端发布版（源码 + 依赖，目标机器自编译）
+bash scripts/build.sh release
+
+# 输出: dist/ddt_client_linux.tar.gz, dist/ddt_client_macos.tar.gz
+```
+
+发布包内容：
+- `src/` — 全部客户端源码（flat 结构）
+- `thirdparty/` — glad、stb、imgui、freetype、protobuf_src、glfw、glm
+- `assets/` — 字体 + 全部 PNG 纹理
+- `shaders/` — GLSL 着色器
+- `proto/` — Protobuf 定义
+- `CMakeLists.txt` — 独立构建配置（standalone，无系统依赖）
+- `ddt.sh` — 一键构建运行脚本
+
+用户在目标机器上：
+```bash
+tar xzf ddt_client_linux.tar.gz
+cd ddt_client_linux
+./ddt.sh
+```
+
+`ddt.sh` 自动检测编译依赖，执行 cmake + make，创建桌面快捷方式（Linux .desktop / macOS .app）。
+
+### 8.5 运行
+
+```bash
+# 启动服务端
+./bin/ddt_server
+
+# 启动客户端（需图形环境）
+./bin/ddt_client
+```
+
+---
+
+## 9. 测试指南
+
+### 9.1 本机测试
+
+```bash
+# 终端 1：启动服务端
+bash scripts/build.sh server && ./bin/ddt_server
+
+# 终端 2：启动客户端 1
+bash scripts/build.sh client && ./bin/ddt_client
+
+# 终端 3：启动客户端 2
+./bin/ddt_client
+```
+
+客户端连接地址填 `127.0.0.1:8073`。
+
+### 9.2 局域网两台电脑测试
+
+```bash
+# 服务端机器
+cd /home/yinghuo/code/proj/sylar && bash scripts/build.sh server && ./bin/ddt_server
+```
+
+```bash
+# 本机终端（端口转发）
+# 1. 查看活跃网卡 IP
+ifconfig | grep 'inet ' | grep -v 127.0.0.1
+# 2. 例如得到局域网 IP: 192.168.31.109
+
+# 3. 端口转发
+brew install socat
+socat TCP-LISTEN:8074,bind=0.0.0.0,fork TCP:192.168.139.145:8073
+
+# 4. 本机客户端连接 127.0.0.1:8073
+```
+
+```bash
+# 第二台电脑客户端连接
+# 局域网 IP:转发端口
+192.168.31.109:8074
+```
+
+### 9.3 公网连接 — cpolar
+
+```bash
+# 服务端机器安装 cpolar
+curl -L https://www.cpolar.com/static/downloads/install-release-cpolar.sh | sudo bash
+cpolar authtoken 你的账号令牌
+cpolar tcp 8073
+# 显示: tcp://2.tcp.cpolar.cn:xxxxx
+
+# 客户端连接
+2.tcp.cpolar.cn:xxxxx
+```
+
+### 9.4 公网连接 — 樱花 FRP
+
+不使用云服务器，通过免费内网穿透实现公网连接。
+
+**操作步骤：**
+
+1. 在 [Sakura FRP 官网](https://www.natfrp.com/) 注册账号，进入控制台创建一条 **TCP 隧道**
+   - 本地 IP：`127.0.0.1`
+   - 本地端口：`8073`
+
+2. 下载客户端：https://www.natfrp.com/tunnel/download
+
+3. 登录网页端控制台启动隧道：https://www.natfrp.com/remote/v2
+
+4. 通过控制台日志找到公网 IP 和端口，客户端填入即可连接
+
+---
+
+# sylar 学习日志
+实现基于WebSocket的多人聊天室
+
 ![chat_room](./assets/chat_room.gif)
 
-### 仓库git操作
+## 仓库git操作
 
 补充笔记
 

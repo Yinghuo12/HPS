@@ -1,16 +1,42 @@
-# 编译输出
-build/**
-!build/
+# Build output
+build/
+dist/
 
-# git
-**/.git/
+# Compiled binaries and libraries
+bin/ddt_client
+bin/ddt_server
+bin/rpc_test_callee
+bin/rpc_test_caller
+bin/chat_room
+bin/echo_*
+bin/my_http_server
+bin/test*
+bin/*.txt
+bin/*.dat
+bin/logs/
+bin/html/
+lib/*.a
+lib/*.so
+*.o
 
-# 第三方库
-include/boost/**
-!include/boost/
+# Framework deps — too large, install via system packages
+# boost: sudo apt install libboost-all-dev
+# yaml-cpp: sudo apt install libyaml-cpp-dev
+framework/include/boost/
+framework/include/yaml-cpp/
 
-include/yaml-cpp/**
-!include/yaml-cpp/
+# Thirdparty git dirs (keep source, remove .git)
+thirdparty/*/.git/
 
-# 日志文件
-bin/logs/**
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+
+# Logs
+logs/
+*.log

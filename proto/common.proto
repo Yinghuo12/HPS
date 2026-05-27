@@ -1,0 +1,59 @@
+syntax = "proto3";
+package ddt;
+
+// ---- 频道类型 ----
+enum ChannelType {
+  CHANNEL_TEAM      = 0;
+  CHANNEL_ALL       = 1;
+  CHANNEL_ROOM      = 2;
+  CHANNEL_WORLD     = 3;
+  CHANNEL_SYSTEM    = 4;
+  CHANNEL_BROADCAST = 5;
+  CHANNEL_PRIVATE   = 6;
+}
+
+// ---- 队伍 ----
+enum TeamSide {
+  TEAM_RED  = 0;
+  TEAM_BLUE = 1;
+}
+
+// ---- 共享消息 ----
+
+message TrajectoryPoint {
+  float x = 1;
+  float y = 2;
+  float t = 3;
+}
+
+message PlayerState {
+  uint32 id        = 1;
+  string name      = 2;
+  float  x         = 3;
+  float  y         = 4;
+  int32  hp        = 5;
+  int32  max_hp    = 6;
+  int32  angle     = 7;
+  int32  direction = 8;
+}
+
+message ErrorNotify {
+  int32  code = 1;
+  string msg  = 2;
+}
+
+message PlayerSlot {
+  uint32   player_id   = 1;
+  string   player_name = 2;
+  TeamSide team        = 3;
+  bool     ready       = 4;
+}
+
+message RoomInfo {
+  uint32             room_id       = 1;
+  string             room_name     = 2;
+  int32              player_count  = 3;
+  int32              max_players   = 4;
+  bool               game_started  = 5;
+  repeated PlayerSlot players      = 6;
+}

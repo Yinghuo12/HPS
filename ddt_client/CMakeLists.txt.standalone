@@ -1,0 +1,142 @@
+cmake_minimum_required(VERSION 3.14)
+project(ddt_client)
+
+# 发布包布局 (fully offline, no system protoc needed):
+#   CMakeLists.txt          (this file)
+#   src/*.cc/*.h             (source files)
+#   src/cmake/               (cmake modules)
+#   proto/ddt.proto
+#   thirdparty/             (glad, stb, imgui, freetype, protobuf_src, etc.)
+
+set(DDT_SRC  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+set(DDT_TP   ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty)
+set(DDT_CMAKE ${CMAKE_CURRENT_SOURCE_DIR}/src/cmake)
+set(DDT_PROTO ${CMAKE_CURRENT_SOURCE_DIR}/proto)
+
+# 加载 cmake 模块
+list(APPEND CMAKE_MODULE_PATH ${DDT_CMAKE})
+include(CompilerSettings)
+include(Dependencies)
+include(RuntimePath)
+
+# --- Protobuf (从本地源码编译，确保版本完全匹配) ---
+set(protobuf_BUILD_TESTS OFF CACHE BOOL "")
+set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "")
+set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "")
+set(protobuf_WITH_ZLIB OFF CACHE BOOL "")
+set(protobuf_BUILD_PROTOC_BINARIES ON CACHE BOOL "")
+add_subdirectory(${DDT_TP}/protobuf_src ${CMAKE_BINARY_DIR}/_protobuf)
+
+# 现在 protoc 已构建，用于生成 .pb 文件
+set(DDT_PB_DIR ${CMAKE_BINARY_DIR}/proto)
+file(MAKE_DIRECTORY ${DDT_PB_DIR})
+
+# 获取刚构建的 protoc 路径
+if(TARGET protoc)
+    # protoc 从 add_subdirectory 构建
+    set(PROTOC_PATH $<TARGET_FILE:protoc>)
+else()
+    set(PROTOC_PATH ${Protobuf_PROTOC_EXECUTABLE})
+endif()
+
+add_custom_command(
+    OUTPUT ${DDT_PB_DIR}/ddt.pb.cc ${DDT_PB_DIR}/ddt.pb.h
+    COMMAND ${PROTOC_PATH}
+        --proto_path=${DDT_PROTO}
+        --cpp_out=${DDT_PB_DIR}
+        ${DDT_PROTO}/ddt.proto
+    DEPENDS protoc ${DDT_PROTO}/ddt.proto
+    COMMENT "Generating DDT protobuf sources"
+)
+
+# 设置依赖（FetchContent 自动下载缺失的库 - GLFW/GLM/FreeType）
+set(DDT_PROTOBUF_BUILTIN ON CACHE BOOL "Protobuf built from bundled source" FORCE)
+setup_all_dependencies()
+
+# --- OpenGL ---
+if(APPLE)
+    find_library(OPENGL_LIB OpenGL REQUIRED)
+else()
+    set(OpenGL_GL_PREFERENCE GLVND)
+    find_package(OpenGL REQUIRED)
+    set(OPENGL_LIB OpenGL::GL)
+endif()
+
+# --- 头文件 ---
+include_directories(
+    ${DDT_SRC}
+    ${DDT_TP}/glad/include
+    ${DDT_TP}/stb
+    ${DDT_TP}/imgui
+    ${DDT_TP}/imgui/backends
+    ${DDT_PB_DIR}
+)
+
+# --- 第三方源文件 ---
+set(GLAD_SRC ${DDT_TP}/glad/src/glad.c)
+
+set(IMGUI_SRC
+    ${DDT_TP}/imgui/imgui.cpp
+    ${DDT_TP}/imgui/imgui_draw.cpp
+    ${DDT_TP}/imgui/imgui_tables.cpp
+    ${DDT_TP}/imgui/imgui_widgets.cpp
+    ${DDT_TP}/imgui/imgui_demo.cpp
+    ${DDT_TP}/imgui/backends/imgui_impl_glfw.cpp
+    ${DDT_TP}/imgui/backends/imgui_impl_opengl3.cpp
+)
+
+# --- 客户端源文件 ---
+set(CLIENT_SRC
+    ${DDT_SRC}/main.cc
+    ${DDT_SRC}/game.cc
+    ${DDT_SRC}/game_object.cc
+    ${DDT_SRC}/projectile.cc
+    ${DDT_SRC}/shader.cc
+    ${DDT_SRC}/texture.cc
+    ${DDT_SRC}/resource_manager.cc
+    ${DDT_SRC}/sprite_renderer.cc
+    ${DDT_SRC}/sprite_batch.cc
+    ${DDT_SRC}/terrain.cc
+    ${DDT_SRC}/text_renderer.cc
+    ${DDT_SRC}/camera.cc
+    ${DDT_SRC}/particle_system.cc
+    ${DDT_SRC}/ws_client.cc
+    ${DDT_SRC}/network_client.cc
+    ${DDT_PB_DIR}/ddt.pb.cc
+    ${IMGUI_SRC}
+    ${GLAD_SRC}
+)
+
+add_executable(ddt_client ${CLIENT_SRC})
+
+# 确保 protobuf 先编译
+add_dependencies(ddt_client protoc)
+
+# --- 链接 ---
+if(TARGET protobuf::libprotobuf)
+    set(PB_LIB protobuf::libprotobuf)
+else()
+    set(PB_LIB libprotobuf)
+endif()
+
+if(APPLE)
+    target_link_libraries(ddt_client
+        ${OPENGL_LIB}
+        glfw
+        ${PB_LIB}
+        Freetype::Freetype
+    )
+else()
+    target_link_libraries(ddt_client
+        OpenGL::GL
+        glfw
+        ${PB_LIB}
+        Freetype::Freetype
+        m dl pthread
+    )
+endif()
+
+# --- 输出到项目根目录 ---
+set_target_properties(ddt_client PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)

@@ -1,0 +1,55 @@
+physics:
+  air_factor: 0.89927083
+  wind_factor: 5.8709153
+  gravity_factor: -172.06527992
+  force_factor: 41.0
+  dt: 0.01
+
+game:
+  world_width: 1400
+  world_length: 3000
+  move_speed: 20.0
+  move_cooldown: 0.2
+  max_move_per_turn: 200
+  turn_timeout: 30
+
+combat:
+  base_damage: 25
+  blast_radius: 50.0
+  hit_radius: 30.0
+  player_hitbox: 25.0
+  min_angle: 20
+  max_angle: 65
+  min_force: 0
+  max_force: 100
+
+terrain:
+  base_height: 1100.0
+  min_height: 600.0
+  max_height: 1250.0
+  valley_amplitude: 2380.0
+  valley_scale: 3.0
+  valley_base: 2860.0
+  valley_base_scale: 2.1
+  grass_depth: 10
+  explode_radius: 30.0
+
+player:
+  start_hp: 100
+  size: 30
+  red_spawn_x: 200.0
+  blue_spawn_x: 2800.0
+  spawn_y: 1100.0
+  move_boundary: 2950.0
+
+server:
+  host: "0.0.0.0"
+  port: 8073
+  db_host: "127.0.0.1"
+  db_port: 3306
+  db_user: "root"
+  db_pass: "123456"
+  db_name: "ddt_game"
+  db_pool_size: 4
+  redis_host: "127.0.0.1"
+  redis_port: 6379
