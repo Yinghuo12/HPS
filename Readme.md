@@ -1,12 +1,17 @@
-# 基于高性能协程服务器的仿弹弹堂游戏 v0.1
+# 基于高性能协程服务器的仿弹弹堂游戏
+
 ## 项目简介
 学习和兴趣爱好，基于sylar协程服务器框架，实现一个仿弹弹堂游戏。
 
 服务端：C++ sylar协程服务器
 
-客户端：OpenGL
+客户端：Imgui + OpenGL 3.3
 
 ## 展示
+### v0.2
+![v0.2_game](assets/v0.2_game.png)
+
+### v0.1
 UI界面
 ![ddt_ui](assets/ddt_ui.png)
 
@@ -19,8 +24,29 @@ UI界面
 聊天界面
 ![ddt_chat](assets/ddt_chat.png)
 
-战斗界面
+战斗界面 (待修复)
 ![ddt_game](assets/ddt_game.png)
+
+## v0.2 更新日志 (Bug Fix & 体验优化)
+
+### 稳定性
+- **修复 WebSocket 竞态条件**：UI 线程与 IO 线程同时发送导致帧数据交错，添加 mutex 保护
+- **修复 PING 帧导致断连**：sylar 框架 ws_session 处理 PING 时未消费 mask+payload 导致帧错位，所有 `invalid opcode` 断连问题根除
+- **修复 ESC 退出 Segfault**：disconnect 改用 shutdown+join 安全回收线程，替代 detach
+- **修复 macOS Bus Error**：RGB 纹理缺少 `glPixelStorei(GL_UNPACK_ALIGNMENT, 1)` 导致 ARM64 崩溃
+- **服务端日志落盘**：添加 FileLogAppender，日志写入 `logs/ddt_server.log`
+
+### 游戏体验
+- **Mac Retina 屏幕适配**：每帧动态获取 framebuffer 物理像素尺寸设置 viewport，解决高 DPI 屏幕画面只占左下角的问题
+- **重力系统**：玩家出生在天空自由落体到地面；脚下地形被炸毁时自动坠落
+- **防连发机制**：客户端 `m_hasShot` 锁 + 服务端 `m_playerShootLocked` 双重拦截，每回合只能开火一次
+- **子弹出生点修正**：枪口位置偏移 ±45px/40px，避免开局撞地形自爆
+
+### 构建
+- **CMake FetchContent**：自动下载 Boost、yaml-cpp、GLFW、FreeType 依赖，一键构建
+- **build.sh 脚本**：支持 `setup/server/client/all` 子命令
+
+详细修复记录见 [BugFix.md](docs/BugFix.md)
 
 ## 使用资源和鸣谢
 1. [sylar](https://github.com/sylar-yin/sylar) 协程服务器框架

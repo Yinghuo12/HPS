@@ -1,4 +1,5 @@
 #include <csignal>
+#include <atomic>
 #include "sylar/log.h"
 #include "sylar/iomanager.h"
 #include "sylar/http/ws_server.h"
@@ -9,24 +10,39 @@
 #include "ddt_config.h"
 
 static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
-
 static ddt::DDTWSServlet::ptr s_ddt_servlet;
 
+// 1. 使用原子布尔变量作为退出标记。
+// 信号处理函数必须保持绝对的简洁，不能有任何锁、日志和 hook 的系统调用。
+static std::atomic<bool> g_quit{false};
+
 static void gracefulShutdown(int signum) {
-    SYLAR_LOG_INFO(g_logger) << "Received signal " << signum << ", shutting down gracefully";
-    if (s_ddt_servlet) {
-        s_ddt_servlet->broadcastShutdown();
-    }
-    // Give clients a moment to receive the message, then exit
-    usleep(500000);  // 500ms
-    _exit(0);
+    // 仅仅置位，然后立即返回，把真正退出的脏活累活交给主协程调度器去做
+    g_quit = true;
 }
 
 int main(int argc, char** argv) {
+    // 忽略向已关闭的 socket 写数据导致的 SIGPIPE 信号
     signal(SIGPIPE, SIG_IGN);
+    // 注册终止信号
     signal(SIGINT, gracefulShutdown);
     signal(SIGTERM, gracefulShutdown);
+    
     sylar::EnvMgr::GetInstance()->init(argc, argv);
+
+    // === File logging ===
+    {
+        auto logger = SYLAR_LOG_ROOT();
+        sylar::FileLogAppender::ptr file_appender(new sylar::FileLogAppender("logs/ddt_server.log"));
+        sylar::LogFormatter::ptr fmt(new sylar::LogFormatter(
+            "%d{%Y-%m-%d %H:%M:%S}%T%t%T%F%T%p%T%c%T%f:%l%T%m%n"));
+        file_appender->setFormatter(fmt);
+        file_appender->setLevel(sylar::LogLevel::DEBUG);
+        logger->addAppender(file_appender);
+    }
+
+    SYLAR_LOG_INFO(g_logger) << "========================================";
+    SYLAR_LOG_INFO(g_logger) << "DDT Server starting...";
 
     // Load game config
     auto& config = ddt::GameConfig::Instance();
@@ -44,7 +60,29 @@ int main(int argc, char** argv) {
         SYLAR_LOG_ERROR(g_logger) << "Database init failed, continuing without DB";
     }
 
+    // 初始化 IOManager（主事件循环）
     sylar::IOManager iom(4, true, "ddt");
+
+    // 2. 将关闭逻辑转移到正常的协程定时器中处理（这是解决死锁和退不出的核心）
+    // 添加一个循环定时器（每 100 毫秒检查一次 g_quit）
+    iom.addTimer(100, []() {
+        if (g_quit) {
+            SYLAR_LOG_INFO(g_logger) << "Detect quit signal, shutting down gracefully...";
+            if (s_ddt_servlet) {
+                // 此时执行在合法的协程上下文中，读写锁和发送 socket 数据都是绝对安全的
+                s_ddt_servlet->broadcastShutdown();
+            }
+            
+            // 延迟 500ms，让断开连接的 WS Frame 有时间发送出去，然后退出
+            sylar::IOManager::GetThis()->addTimer(500, []() {
+                SYLAR_LOG_INFO(g_logger) << "Server exit.";
+                _exit(0);
+            }, false); // false = 单次定时器
+            
+            // 将 quit 置回 false，防止这段逻辑在这 500ms 内被触发多次
+            g_quit = false; 
+        }
+    }, true); // true = 循环定时器
 
     // WebSocket server
     sylar::http::WSServer::ptr ws_server(new sylar::http::WSServer(&iom, &iom));
@@ -67,5 +105,6 @@ int main(int argc, char** argv) {
     ws_server->start();
     SYLAR_LOG_INFO(g_logger) << "DDT game server started on "
         << config.host << ":" << config.port;
-    return 0;
+        
+    return 0; // iom 将会阻塞并接管主线程，直到所有协程结束。
 }

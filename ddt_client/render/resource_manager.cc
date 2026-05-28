@@ -38,18 +38,17 @@ void ResourceManager::Clear() {
 
 Texture2D ResourceManager::loadTextureFromFile(const GLchar* file, GLboolean alpha) {
     Texture2D texture;
-    if (alpha) {
-        texture.InternalFormat = GL_RGBA;
-        texture.ImageFormat = GL_RGBA;
-    }
+    texture.InternalFormat = GL_RGBA;
+    texture.ImageFormat = GL_RGBA;
     int width, height, nrChannels;
-    unsigned char* data = stbi_load(file, &width, &height, &nrChannels, 0);
+    // 【修复关键】：第5个参数传 4 (STBI_rgb_alpha)，强制解码为 4 通道，保证永远 4 字节对齐
+    unsigned char* data = stbi_load(file, &width, &height, &nrChannels, 4);
+
     if (data) {
         std::cout << "  [OK] " << file << " " << width << "x" << height << " ch=" << nrChannels << std::endl;
         texture.Generate(width, height, data);
     } else {
         std::cerr << "Texture failed to load: " << file << std::endl;
     }
-    stbi_image_free(data);
     return texture;
 }

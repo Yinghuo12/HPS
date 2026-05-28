@@ -190,6 +190,7 @@ int32_t DDTWSServlet::handle(sylar::http::HttpRequest::ptr header,
 
         case GameMessage::kJoinRoomRequest: {
             auto& req = msg.join_room_request();
+            SYLAR_LOG_INFO(g_logger) << "JoinRoom: player looking for room_id=" << req.room_id() << " team=" << req.team();
 
             sylar::RWMutex::ReadLock lock(m_mutex);
             auto it = m_sessionPlayers.find(session.get());
@@ -244,6 +245,7 @@ int32_t DDTWSServlet::handle(sylar::http::HttpRequest::ptr header,
 
         case GameMessage::kCreateRoomRequest: {
             auto& req = msg.create_room_request();
+            SYLAR_LOG_INFO(g_logger) << "CreateRoom: " << req.room_name();
 
             sylar::RWMutex::ReadLock lock(m_mutex);
             auto it = m_sessionPlayers.find(session.get());

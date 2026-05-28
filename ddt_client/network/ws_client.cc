@@ -204,6 +204,7 @@ bool WSClient::wsHandshake(const std::string& host, const std::string& path) {
 }
 
 bool WSClient::sendWSFrame(int opcode, const uint8_t* data, size_t len, bool mask) {
+    std::lock_guard<std::mutex> lock(m_frameMutex);
     std::vector<uint8_t> frame;
     frame.push_back(0x80 | opcode); // FIN + opcode
 

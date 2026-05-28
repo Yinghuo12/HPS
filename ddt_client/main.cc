@@ -41,7 +41,8 @@ int main() {
         return -1;
     }
     glfwMakeContextCurrent(window);
-
+    glfwSwapInterval(0); // 0 表示关闭垂直同步（无限帧），1 表示开启（锁60帧）
+    
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         std::cerr << "Failed to initialize GLAD" << std::endl;
         return -1;
@@ -78,6 +79,11 @@ int main() {
         GLfloat deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
         if (deltaTime > MAX_DT) deltaTime = MAX_DT;
+
+        // Fix Mac Retina: use real framebuffer size, not logical window size
+        int fb_width, fb_height;
+        glfwGetFramebufferSize(window, &fb_width, &fb_height);
+        glViewport(0, 0, fb_width, fb_height);
 
         glfwPollEvents();
 

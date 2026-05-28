@@ -100,12 +100,28 @@ void NetworkClient::disconnect() {
     m_connected = false;
     m_connectResult = false;
     m_connectDone = true;
-    m_connectCv.notify_one();
+    m_connectCv.notify_all();
+
+    // Shutdown the socket to unblock the recv loop in the IO thread
+    {
+        std::lock_guard<std::mutex> lock(m_sendMutex);
+        if (m_connection) {
+            auto* conn = static_cast<sylar::http::WSConnection*>(m_connection);
+            if (conn) {
+                auto sock = conn->getSocket();
+                if (sock) {
+                    shutdown(sock->getSocket(), SHUT_RDWR);
+                }
+            }
+            m_connection = nullptr;
+        }
+    }
+
+    // Now safe to join — recv loop will exit after socket shutdown
     if (m_ioThread && m_ioThread->joinable()) {
-        m_ioThread->detach();
+        m_ioThread->join();
     }
     m_ioThread.reset();
-    m_connection = nullptr;
 }
 
 void NetworkClient::sendLogin(const std::string& name, const std::string& password) {

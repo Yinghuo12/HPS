@@ -132,7 +132,6 @@ bool GameRoom::canStart() const {
     if (m_playerCount < 2) return false;
     if (m_gameStarted) return false;
 
-    // Check each team has at least one player
     bool hasRed = false, hasBlue = false;
     for (int i = 0; i < m_maxPlayers; i++) {
         if (!m_players[i]) continue;
@@ -144,7 +143,6 @@ bool GameRoom::canStart() const {
     }
     if (!hasRed || !hasBlue) return false;
 
-    // Check all players are ready
     for (int i = 0; i < m_maxPlayers; i++) {
         if (!m_players[i]) continue;
         auto it = m_playerReady.find(m_players[i]->getId());
@@ -162,11 +160,10 @@ void GameRoom::startGame() {
     m_turnNumber = 0;
     m_wind = PhysicsEngine::generateWind();
     m_playerMoveUsed.clear();
+    m_playerShootLocked.clear();
 
-    // Generate server-side heightmap
     generateHeightMap();
 
-    // Collect active players into slots for the 1v1 game
     Player::ptr p1, p2;
     int slot = 0;
     for (int i = 0; i < m_maxPlayers && slot < 2; i++) {
@@ -178,17 +175,22 @@ void GameRoom::startGame() {
     }
     if (!p1 || !p2) { m_gameStarted = false; return; }
 
-    // Set positions based on team
+    int ix1 = std::max(0, std::min((int)cfg.red_spawn_x, (int)m_heightMap.size() - 1));
+    float spawn_y1 = m_heightMap[ix1] - cfg.player_size;
+
+    int ix2 = std::max(0, std::min((int)cfg.blue_spawn_x, (int)m_heightMap.size() - 1));
+    float spawn_y2 = m_heightMap[ix2] - cfg.player_size;
+
     auto team1 = m_playerTeam[p1->getId()];
     if (team1 == ddt::TEAM_RED) {
-        p1->setPosition(cfg.red_spawn_x, cfg.spawn_y);
+        p1->setPosition(cfg.red_spawn_x, spawn_y1);
         p1->setDirection(1);
-        p2->setPosition(cfg.blue_spawn_x, cfg.spawn_y);
+        p2->setPosition(cfg.blue_spawn_x, spawn_y2);
         p2->setDirection(0);
     } else {
-        p2->setPosition(cfg.red_spawn_x, cfg.spawn_y);
+        p2->setPosition(cfg.red_spawn_x, spawn_y1);
         p2->setDirection(1);
-        p1->setPosition(cfg.blue_spawn_x, cfg.spawn_y);
+        p1->setPosition(cfg.blue_spawn_x, spawn_y2);
         p1->setDirection(0);
     }
     p1->setHP(cfg.start_hp);
@@ -198,7 +200,6 @@ void GameRoom::startGame() {
 
     m_currentTurnIndex = 0;
 
-    // Send RoomReadyNotify
     ddt::GameMessage msg;
     auto* ready = msg.mutable_room_ready_notify();
     ready->set_room_id(m_roomId);
@@ -247,16 +248,16 @@ void GameRoom::startGame() {
 
 void GameRoom::handleShoot(uint32_t player_id, int angle, double force) {
     if (!m_gameStarted) return;
+    if (m_playerShootLocked.count(player_id)) return;
+    m_playerShootLocked[player_id] = true;
 
     auto& cfg = GameConfig::Instance();
 
-    // Anti-cheat: validate angle and force
     if (angle < cfg.min_angle || angle > cfg.max_angle) return;
     if (force < cfg.min_force || force > cfg.max_force) return;
 
     cancelTurnTimer();
 
-    // Find current turn player
     Player::ptr current = nullptr;
     int activeIdx = 0;
     for (int i = 0; i < m_maxPlayers; i++) {
@@ -268,68 +269,73 @@ void GameRoom::handleShoot(uint32_t player_id, int angle, double force) {
             activeIdx++;
         }
     }
-    if (!current || current->getId() != player_id) {
-        SYLAR_LOG_WARN(g_logger) << "Not player's turn: " << player_id;
-        return;
-    }
+    if (!current || current->getId() != player_id) return;
 
     auto shooter = getPlayer(player_id);
     if (!shooter) return;
     shooter->setAngle(angle);
 
+    int physics_angle = angle;
+    if (shooter->getDirection() == 0) { 
+        physics_angle = 180 - angle;
+    }
+
+    float start_x = shooter->getX() + (shooter->getDirection() == 1 ? 45.0f : -5.0f);
+    float start_y = shooter->getY() - 10.0f; 
+
     auto result = PhysicsEngine::computeTrajectory(
-        shooter->getX(), shooter->getY(), angle, force, m_wind,
+        start_x, start_y, physics_angle, force, m_wind,
         m_heightMap, cfg.world_length, cfg.world_width, cfg.physics_dt);
 
-    // Apply explosion to server heightmap
     if (!result.hit_offscreen) {
         applyExplosion(result.hit_x, result.hit_y, cfg.terrain_explode_radius);
     }
 
-    // Find first active player as opponent for hit check (1v1 logic)
-    Player::ptr opponent = nullptr;
-    for (int i = 0; i < m_maxPlayers; i++) {
-        if (m_players[i] && m_players[i]->getId() != player_id) {
-            opponent = m_players[i];
-            break;
-        }
-    }
-
     bool hit = false;
     uint32_t hit_id = 0;
-    int damage = 0;
+    int max_damage = 0;
     float hit_x = result.hit_x;
     float hit_y = result.hit_y;
-    ddt::ShootResultNotify::DamageType damageType = ddt::ShootResultNotify::NORMAL;
+    ddt::ShootResultNotify::DamageType bestDamageType = ddt::ShootResultNotify::NORMAL;
 
-    if (opponent && !result.hit_offscreen) {
-        hit = PhysicsEngine::checkHit(hit_x, hit_y,
-            opponent->getX() + (float)cfg.player_hitbox,
-            opponent->getY() + (float)cfg.player_hitbox,
-            (float)cfg.hit_radius);
-        if (hit) {
-            hit_id = opponent->getId();
-            damage = PhysicsEngine::calculateDamage(hit_x, hit_y,
-                opponent->getX() + (float)cfg.player_hitbox,
-                opponent->getY() + (float)cfg.player_hitbox,
-                cfg.base_damage, (float)cfg.blast_radius);
+    if (!result.hit_offscreen) {
+        for (int i = 0; i < m_maxPlayers; i++) {
+            if (m_players[i]) {
+                bool isHit = PhysicsEngine::checkHit(hit_x, hit_y,
+                    m_players[i]->getX() + (float)cfg.player_hitbox,
+                    m_players[i]->getY() + (float)cfg.player_hitbox,
+                    (float)cfg.hit_radius);
 
-            // DDT-style damage variants
-            int roll = std::rand() % 100;
-            if (roll < 33) {
-                damage = (int)(damage * 1.5);
-                damageType = ddt::ShootResultNotify::CRITICAL;
-            } else if (roll < 53) {
-                damage = damage / 2;
-                if (damage < 1) damage = 1;
-                damageType = ddt::ShootResultNotify::BLOCK;
+                if (isHit) {
+                    hit = true;
+                    int damage = PhysicsEngine::calculateDamage(hit_x, hit_y,
+                        m_players[i]->getX() + (float)cfg.player_hitbox,
+                        m_players[i]->getY() + (float)cfg.player_hitbox,
+                        cfg.base_damage, (float)cfg.blast_radius);
+
+                    ddt::ShootResultNotify::DamageType damageType = ddt::ShootResultNotify::NORMAL;
+                    int roll = std::rand() % 100;
+                    if (roll < 30) {
+                        damage = (int)(damage * 1.5);
+                        damageType = ddt::ShootResultNotify::CRITICAL;
+                    } else if (roll < 50) {
+                        damage = damage / 2;
+                        if (damage < 1) damage = 1;
+                        damageType = ddt::ShootResultNotify::BLOCK;
+                    }
+
+                    if (damage > max_damage) {
+                        max_damage = damage;
+                        bestDamageType = damageType;
+                        hit_id = m_players[i]->getId();
+                    }
+
+                    m_players[i]->addHP(-damage);
+                }
             }
-
-            opponent->addHP(-damage);
         }
     }
 
-    // Get the two active players for the notify
     Player::ptr gp1 = nullptr, gp2 = nullptr;
     for (int i = 0; i < m_maxPlayers; i++) {
         if (m_players[i]) {
@@ -348,8 +354,8 @@ void GameRoom::handleShoot(uint32_t player_id, int angle, double force) {
     notify->set_hit_y(hit_y);
     notify->set_hit_player(hit);
     notify->set_hit_player_id(hit_id);
-    notify->set_damage(damage);
-    notify->set_damage_type(damageType);
+    notify->set_damage(max_damage);
+    notify->set_damage_type(bestDamageType);
 
     for (auto& pt : result.points) {
         auto* p = notify->add_points();
@@ -387,14 +393,28 @@ void GameRoom::handleShoot(uint32_t player_id, int angle, double force) {
 
     SYLAR_LOG_INFO(g_logger) << "Room " << m_roomId
         << " player " << player_id << " shot: angle=" << angle
-        << " force=" << force << " damage=" << damage;
+        << " force=" << force << " damage=" << max_damage;
 
-    if (opponent && opponent->getHP() <= 0) {
-        checkGameOver();
-        return;
-    }
+    float flightTime = result.points.empty() ? 0.0f : result.points.back().t();
+    uint64_t delayMs = static_cast<uint64_t>(flightTime * 1000.0f) + 1500;
 
-    nextTurn();
+    auto self = shared_from_this();
+    m_turnTimer = sylar::IOManager::GetThis()->addTimer(delayMs, [self]() {
+        if (!self->m_gameStarted) return;
+        
+        bool over = false;
+        for (int i = 0; i < self->m_maxPlayers; i++) {
+            if (self->m_players[i] && self->m_players[i]->getHP() <= 0) {
+                over = true; 
+                break;
+            }
+        }
+        if (over) {
+            self->checkGameOver();
+        } else {
+            self->nextTurn();
+        }
+    }, false);
 }
 
 void GameRoom::handleMove(uint32_t player_id, float delta_x) {
@@ -402,17 +422,19 @@ void GameRoom::handleMove(uint32_t player_id, float delta_x) {
 
     auto& cfg = GameConfig::Instance();
 
-    // Anti-cheat: single move distance check
     if (std::abs(delta_x) > cfg.move_speed) return;
 
-    // Anti-cheat: cumulative per-turn distance check
     float& used = m_playerMoveUsed[player_id];
     if (used + std::abs(delta_x) > cfg.max_move_per_turn) return;
 
     auto player = getPlayer(player_id);
     if (!player) return;
 
-    // Verify turn
+    // 【修改点 10】：当玩家移动时，根据 delta_x 同步更新服务端记录的朝向。
+    // 这解决了右侧玩家向右走，掉头后开火方向仍然往左打的物理冲突 bug。
+    if (delta_x > 0) player->setDirection(1);
+    else if (delta_x < 0) player->setDirection(0);
+
     int activeIdx = 0;
     bool isMyTurn = false;
     for (int i = 0; i < m_maxPlayers; i++) {
@@ -427,7 +449,10 @@ void GameRoom::handleMove(uint32_t player_id, float delta_x) {
     float new_x = player->getX() + delta_x;
     if (new_x < 0) new_x = 0;
     if (new_x > cfg.move_boundary) new_x = cfg.move_boundary;
-    player->setPosition(new_x, player->getY());
+    
+    int ix = std::max(0, std::min((int)new_x, (int)m_heightMap.size() - 1));
+    float new_y = m_heightMap[ix] - cfg.player_size;
+    player->setPosition(new_x, new_y);
 
     used += std::abs(delta_x);
 
@@ -452,8 +477,8 @@ void GameRoom::nextTurn() {
     m_turnNumber++;
     m_wind = PhysicsEngine::generateWind();
     m_playerMoveUsed.clear();
+    m_playerShootLocked.clear();
 
-    // Find current turn player
     Player::ptr current = nullptr;
     int activeIdx = 0;
     for (int i = 0; i < m_maxPlayers; i++) {
@@ -564,7 +589,6 @@ void GameRoom::generateHeightMap() {
     for (int x = 0; x < worldLen; x++) {
         float baseH = (float)cfg.terrain_base_height;
 
-        // Parabolic valley (same formula as client terrain.cc)
         float dx = (float)x - worldLen * 0.5f;
         float a = (float)cfg.terrain_valley_amplitude * (float)cfg.terrain_valley_scale;
         float sag = a * a - dx * dx;
@@ -572,10 +596,8 @@ void GameRoom::generateHeightMap() {
             baseH = (float)cfg.terrain_valley_base * (float)cfg.terrain_valley_base_scale - std::sqrt(sag);
         }
 
-        // Rolling hills
         baseH += 25.0f * std::sin(x * 0.008f) + 12.0f * std::sin(x * 0.023f);
 
-        // Platform bumps
         if (x > 400 && x < 600) baseH -= 40.0f;
         if (x > 1400 && x < 1600) baseH -= 60.0f;
         if (x > 2400 && x < 2600) baseH -= 40.0f;
@@ -583,9 +605,6 @@ void GameRoom::generateHeightMap() {
         m_heightMap[x] = std::max((float)cfg.terrain_min_height,
                                   std::min((float)cfg.terrain_max_height, baseH));
     }
-
-    SYLAR_LOG_INFO(g_logger) << "Room " << m_roomId << " heightmap generated ("
-        << worldLen << " columns)";
 }
 
 void GameRoom::applyExplosion(float cx, float cy, float radius) {
@@ -596,25 +615,16 @@ void GameRoom::applyExplosion(float cx, float cy, float radius) {
     float r2 = radius * radius;
     for (int x = x0; x <= x1; x++) {
         float dx = (float)x - cx;
-        // At this x, the explosion circle extends from cy - sqrt(r^2 - dx^2) to cy + sqrt(r^2 - dx^2)
         float dx2 = r2 - dx * dx;
         if (dx2 <= 0) continue;
         float halfW = std::sqrt(dx2);
         float topEdge = cy - halfW;
         float bottomEdge = cy + halfW;
 
-        // If the current height is below the top edge of the explosion,
-        // we need to dig out the terrain within the circle
         if (m_heightMap[x] < bottomEdge) {
-            // Terrain exists within explosion zone
             if (m_heightMap[x] < topEdge) {
-                // Explosion fully covers the terrain at this x
-                // Push height below the bottom of the explosion (make a hole)
                 m_heightMap[x] = bottomEdge + 1.0f;
             } else {
-                // Terrain is partially in the explosion zone
-                // Only remove the part inside the circle
-                // The terrain above the explosion remains
                 m_heightMap[x] = bottomEdge + 1.0f;
             }
         }

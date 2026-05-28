@@ -34,7 +34,7 @@ enum CameraMode {
 struct RoomSlot {
     uint32_t player_id;
     std::string player_name;
-    int team;       // 0=RED, 1=BLUE
+    int team;       
     bool ready;
 };
 
@@ -66,7 +66,6 @@ public:
     void RenderImGui();
     void Shutdown();
 
-    // Game objects
     GameObject* Players[2];
     SpriteRenderer* Renderer;
     SpriteBatch* Batch;
@@ -76,11 +75,11 @@ public:
     TextRenderer* Text;
     Camera* m_camera;
 
-    // Game state
     int   CurrentAngle;
     int   OpponentAngle;
     float Power;
     bool  IsCharging;
+    bool  m_hasShot;
     bool  IsMyTurn;
     float Wind;
     std::string MyName;
@@ -91,16 +90,13 @@ public:
     int   MyIndex;
     int   m_lastShooterIdx;
 
-    // Status info
     std::string StatusText;
     std::string ServerAddr;
 
-    // Room system
     uint32_t CurrentRoomId;
     std::vector<RoomInfoClient> RoomList;
     bool m_myReady;
 
-    // Mouse
     double m_mouseX, m_mouseY;
     bool   m_mousePressed;
     bool   m_rightMousePressed;
@@ -109,7 +105,6 @@ public:
     double m_dragLastX, m_dragLastY;
     bool   m_quitRequested;
 
-    // Camera mode
     CameraMode m_cameraMode;
     float m_manualTimer;
     int   m_introPhase;
@@ -132,7 +127,6 @@ private:
     bool m_loggedIn;
     std::string m_password;
 
-    // Chat
     struct ChatMsg {
         int channel;
         uint32_t sender_id;
@@ -145,23 +139,20 @@ private:
     char m_chatInput[256];
     bool m_chatScrollToBottom;
 
-    // Helpers
     GameObject* myPlayer();
     GameObject* opponentPlayer();
     int myHP();
     int opponentHP();
     std::string formatInt(int val);
 
-    // Explosion effects
     struct ExplosionFX {
         glm::vec2 pos;
         float timer;
-        int frame;   // 0-3
+        int frame;   
         bool active;
     };
     std::vector<ExplosionFX> m_explosions;
 
-    // Floating damage numbers
     struct DamageFloat {
         glm::vec2 pos;
         std::string text;
@@ -170,6 +161,20 @@ private:
         bool active;
     };
     std::vector<DamageFloat> m_damageFloats;
+
+    // 添加延迟爆炸缓存、单回合已经移动的距离限额
+    struct PendingHit {
+        bool active = false;
+        float hit_x, hit_y;
+        bool hit_player;
+        uint32_t hit_player_id;
+        int damage;
+        int damage_type;
+        int hp0, hp1;
+        glm::vec2 pos0, pos1;
+    } m_pendingHit;
+
+    float m_moveUsed; // 记录本回合玩家已行走的距离 (max: 200.0f)
 };
 
 #endif

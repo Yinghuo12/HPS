@@ -101,6 +101,7 @@ WSFrameMessage::ptr WSRecvMessage(Stream* stream, bool client) {
     int opcode = 0;
     std::string data;
     int cur_len = 0;
+    
     do {
         WSFrameHead ws_head;
         if(stream->readFixSize(&ws_head, sizeof(ws_head)) <= 0) {
@@ -108,15 +109,54 @@ WSFrameMessage::ptr WSRecvMessage(Stream* stream, bool client) {
         }
         SYLAR_LOG_DEBUG(g_logger) << "WSFrameHead " << ws_head.toString();
 
-        if(ws_head.opcode == WSFrameHead::PING) {
-            SYLAR_LOG_INFO(g_logger) << "PING";
-            if(WSPong(stream) <= 0) {
-                break;
+        // 1. 处理所有控制帧 (CLOSE=0x8, PING=0x9, PONG=0xA)
+        if(ws_head.opcode == WSFrameHead::CLOSE || 
+           ws_head.opcode == WSFrameHead::PING || 
+           ws_head.opcode == WSFrameHead::PONG) {
+           
+            // 控制帧的 payload 长度按规范必定 <= 125，直接读取
+            uint64_t ctrl_len = ws_head.payload;
+            char ctrl_mask[4] = {0};
+            
+            // 消耗掩码
+            if(ws_head.mask) {
+                if(stream->readFixSize(ctrl_mask, sizeof(ctrl_mask)) <= 0) break;
             }
-        } else if(ws_head.opcode == WSFrameHead::PONG) {
-        } else if(ws_head.opcode == WSFrameHead::CONTINUE
+            
+            // 消耗载荷并解码
+            std::string ctrl_payload;
+            if(ctrl_len > 0) {
+                ctrl_payload.resize(ctrl_len);
+                if(stream->readFixSize(&ctrl_payload[0], ctrl_len) <= 0) break;
+                if(ws_head.mask) {
+                    for(size_t i = 0; i < ctrl_len; ++i) {
+                        ctrl_payload[i] ^= ctrl_mask[i % 4];
+                    }
+                }
+            }
+
+            // 根据具体的控制帧类型做出响应
+            if(ws_head.opcode == WSFrameHead::PING) {
+                SYLAR_LOG_INFO(g_logger) << "Received PING, sending PONG";
+                // 收到 PING，回复 PONG (严格按RFC规范应该原样带上 ctrl_payload，但目前框架 WSPong 不带 payload 也能保活)
+                if(WSPong(stream) <= 0) {
+                    break;
+                }
+                continue;
+            } else if(ws_head.opcode == WSFrameHead::PONG) {
+                SYLAR_LOG_INFO(g_logger) << "Received PONG";
+                continue;
+            } else if(ws_head.opcode == WSFrameHead::CLOSE) {
+                SYLAR_LOG_INFO(g_logger) << "Received CLOSE, closing connection";
+                // 收到客户端的 CLOSE 请求，安全跳出循环，底层会执行 stream->close()
+                break; 
+            }
+        } 
+        // 2. 处理所有数据帧 (CONTINUE=0x0, TEXT=0x1, BINARY=0x2)
+        else if(ws_head.opcode == WSFrameHead::CONTINUE
                 || ws_head.opcode == WSFrameHead::TEXT_FRAME
                 || ws_head.opcode == WSFrameHead::BIN_FRAME) {
+            
             if(!client && !ws_head.mask) {
                 SYLAR_LOG_INFO(g_logger) << "WSFrameHead mask != 1";
                 break;
@@ -124,37 +164,28 @@ WSFrameMessage::ptr WSRecvMessage(Stream* stream, bool client) {
             uint64_t length = 0;
             if(ws_head.payload == 126) {
                 uint16_t len = 0;
-                if(stream->readFixSize(&len, sizeof(len)) <= 0) {
-                    break;
-                }
+                if(stream->readFixSize(&len, sizeof(len)) <= 0) break;
                 length = sylar::byteswapOnLittleEndian(len);
             } else if(ws_head.payload == 127) {
                 uint64_t len = 0;
-                if(stream->readFixSize(&len, sizeof(len)) <= 0) {
-                    break;
-                }
+                if(stream->readFixSize(&len, sizeof(len)) <= 0) break;
                 length = sylar::byteswapOnLittleEndian(len);
             } else {
                 length = ws_head.payload;
             }
 
             if((cur_len + length) >= g_websocket_message_max_size->getValue()) {
-                SYLAR_LOG_WARN(g_logger) << "WSFrameMessage length > "
-                    << g_websocket_message_max_size->getValue()
-                    << " (" << (cur_len + length) << ")";
+                SYLAR_LOG_WARN(g_logger) << "WSFrameMessage length > max_size";
                 break;
             }
 
             char mask[4] = {0};
             if(ws_head.mask) {
-                if(stream->readFixSize(mask, sizeof(mask)) <= 0) {
-                    break;
-                }
+                if(stream->readFixSize(mask, sizeof(mask)) <= 0) break;
             }
             data.resize(cur_len + length);
-            if(stream->readFixSize(&data[cur_len], length) <= 0) {
-                break;
-            }
+            if(stream->readFixSize(&data[cur_len], length) <= 0) break;
+            
             if(ws_head.mask) {
                 for(int i = 0; i < (int)length; ++i) {
                     data[cur_len + i] ^= mask[i % 4];
@@ -167,13 +198,17 @@ WSFrameMessage::ptr WSRecvMessage(Stream* stream, bool client) {
             }
 
             if(ws_head.fin) {
-                SYLAR_LOG_DEBUG(g_logger) << data;
+                SYLAR_LOG_DEBUG(g_logger) << "Received Data Frame, length: " << data.size();
                 return WSFrameMessage::ptr(new WSFrameMessage(opcode, std::move(data)));
             }
-        } else {
-            SYLAR_LOG_DEBUG(g_logger) << "invalid opcode=" << ws_head.opcode;
+        } 
+        // 3. 处理非法 Opcode
+        else {
+            SYLAR_LOG_ERROR(g_logger) << "invalid opcode=" << ws_head.opcode << ", closing connection to prevent sync loss";
+            break; // 遇到无法识别的 Opcode，强行断开是最安全的做法，防止缓冲区错乱
         }
     } while(true);
+    
     stream->close();
     return nullptr;
 }

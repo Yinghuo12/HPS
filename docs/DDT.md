@@ -1,4 +1,5 @@
-# DDT 弹弹堂 — 项目文档
+# DDT 弹弹堂 — 项目文档 v0.2
+
 
 ## 目录
 
@@ -11,6 +12,8 @@
 - [7. RPC 框架](#7-rpc-框架)
 - [8. 构建与部署](#8-构建与部署)
 - [9. 测试指南](#9-测试指南)
+- [10. 实现细节](#10-实现细节)
+- [11. 版本更新日志](#11-版本更新日志)
 
 ---
 
@@ -550,3 +553,111 @@ cpolar tcp 8073
 4. 通过控制台日志找到公网 IP 和端口，客户端填入即可连接
 
 ---
+## 10. 实现细节
+
+### 一、 核心同步机制：权威服务器 + 表现层客户端
+
+这是该项目最亮眼的设计之一。对于弹弹堂这类竞技游戏，防外挂和多端同步是重中之重。
+
+**1. 物理弹道同步方案（源码 `ddt_physics.cpp` & `projectile.cpp`）**
+你没有采用两端各自计算物理或者简单的帧同步，而是采用了**绝对的服务器权威（Authoritative Server）模型**：
+*   **服务端瞬间推演**：当玩家按下 FIRE 时，服务端 `GameRoom::handleShoot` 会调用 `PhysicsEngine::computeTrajectory`。服务端利用带有空气阻力、风力、重力的微积分公式（完全复刻了弹弹堂的经典物理常数 `AIR_FACTOR`, `WIND_FACTOR`），在极短时间内（通过 `dt=0.01` 循环）计算出炮弹的**完整飞行轨迹点**（包含 x, y, t）和最终落点。
+*   **客户端插值播放**：服务端将带有时间戳的轨迹点数组（`TrajectoryPoint`）通过 Protobuf 下发。客户端 `Projectile::Update` 完全不进行物理运算，只根据逝去的时间 `m_elapsedTime` 在两个轨迹点之间进行**线性插值（Lerp）**。
+*   **评价**：这种设计**彻底杜绝了客户端物理外挂（如修改重力、穿墙穿地）**，同时解决了网络抖动导致的位置不同步问题。
+
+### 二、 客户端架构分析 (OpenGL 2D 引擎)
+
+你的客户端相当于一个精简版的 Cocos2d-x，麻雀虽小五脏俱全。
+
+**1. 渲染管线与优化（`sprite_batch.cpp` & `sprite_renderer.cpp`）**
+*   **亮点 - 实现了 SpriteBatch**：这是 2D 游戏极佳的性能优化点。你没有对每个精灵调用一次 `glDrawArrays`，而是根据 TextureID 进行排序（`std::stable_sort`），将使用相同贴图的顶点数据合并到一个 VBO 中，最后只需一次 DrawCall 即可绘制大量物件。
+*   **UI 与字体**：巧妙地集成了 `ImGui` 做游戏 UI，极大地降低了手写 UI 控件的成本。同时手写了 `TextRenderer` 结合 `FreeType` 实现了支持 UTF-8 编码的动态字体渲染。
+
+**2. 核心难点：地形破坏的实现（`terrain.cpp`）**
+*   **实现机制**：你使用了**FBO（帧缓冲区对象）**技术。初始化时生成完整的地形贴图。当服务端通知某处发生爆炸时，调用 `RemoveCircle`。
+*   **挖洞算法**：通过 `glReadPixels` 将受影响区域的像素读回 CPU，遍历圆范围内的像素，将其 Alpha 通道设为 0，再通过 `glTexSubImage2D` 传回 GPU，实现了经典的“像素级地形破坏”。
+
+**3. 纯手写 WebSocket 客户端（`ws_client.cpp`）**
+*   脱离了笨重的库（如 Boost.Asio/websocketpp），你用原生 socket 结合 `select` 实现了非阻塞的 TCP 连接，并手写了 WebSocket 的握手协议（SHA1 + Base64）和帧解析（Masking/Unmasking）。这体现了极强的网络底层功底。
+
+### 三、 服务端架构分析 (基于 Sylar)
+
+**1. 协程并发与异步 IO**
+*   服务端入口 `ddt_server.cpp` 结合了 Sylar 的 `IOManager` 和 `WSServer`。这意味着每个玩家的 WebSocket 连接、甚至每一个定时器（如回合倒计时 `m_turnTimer`）都在**用户态协程**中运行，能以极低的资源消耗支撑大量并发房间。
+
+**2. 房间状态机（`ddt_game_room.cpp`）**
+*   每个 `GameRoom` 是一个完整的状态机，管理了玩家加入、准备、游戏开始、回合切换、断线重连等生命周期。
+*   **防作弊检测**：在 `handleMove` 中，你不仅校验了单次移动步长（`move_speed`），还记录了 `m_playerMoveUsed` 限制一回合内的总移动距离（`max_move_per_turn`），逻辑非常严密。
+
+**3. 数据持久化与缓存（`ddt_database.cpp`）**
+*   **MySQL 连接池**：手写了基于 `sylar::Semaphore` 的阻塞式连接池，并在操作时使用了 RAII 机制（`MySQLGuard`），避免了连接泄漏。
+*   **Redis 会话管理**：登录后生成 32 位随机 Token 存入 Redis 并设置过期时间，处理了单点登录和心跳状态。
+*   **密码安全**：内嵌了纯 C++ 的 SHA-256 算法，并结合随机 Salt 存储密码（`hashPassword`），达到了商业级的安全规范。
+
+---
+
+### 四、 深度 Code Review 与优化建议（重点）
+
+尽管代码非常优秀，但在面对更高并发和更复杂的游戏需求时，存在以下几个可以优化的瓶颈：
+
+#### 1. 客户端地形破坏的性能瓶颈 (`terrain.cpp`)
+*   **问题**：`RemoveCircle` 中使用了 `glReadPixels`。这是一个**极其昂贵的操作**，因为它会强制 CPU 等待 GPU 清空渲染流水线（Pipeline Stall）。如果在战斗密集的场景下，每次爆炸都会导致游戏瞬间卡顿（掉帧）。
+*   **优化建议**：**在 CPU 端维护一份地形的 Bitmap（如 `std::vector<uint8_t>`）副本**。当爆炸发生时，直接在 CPU 端的这个 `vector` 中修改 Alpha 值，然后单向调用 `glTexSubImage2D` 提交给 GPU。删掉 `glReadPixels`，你会发现挖坑的性能有质的飞跃。
+
+#### 2. 服务端与客户端地形模型的差异 (`ddt_game_room.cpp` vs `terrain.cpp`)
+*   **问题**：我注意到服务端 `GameRoom::generateHeightMap()` 使用的是一维数组 `std::vector<float> m_heightMap` 记录高度，当爆炸发生时，`applyExplosion` 是将该位置的高度**直接拉低**（`m_heightMap[x] = bottomEdge + 1.0f`）。
+    *   这就意味着你的服务端目前只支持**“U型地形”**，不支持**“O型洞穴”**或者**“悬空岛屿”**。
+    *   而你的客户端是通过像素 Alpha 扣图，实际上是支持洞穴和悬空岛的。这就导致了**前后端物理模型不一致**：如果玩家打出一个横向的洞，客户端显示上面有土，但服务端的炮弹却会直接穿过去（因为服务端只有 1D 高度）。
+*   **优化建议**：服务端也需要将 1D 的 `HeightMap` 升级为 2D 的 `Bitset` 掩码（或者用一维数组+位运算表示）。每次碰撞检测时，像客户端一样检测具体像素是否为固体。
+
+#### 3. 客户端网络层的阻塞风险 (`ws_client.cpp`)
+*   **问题**：在 `recvBinary` 中，你使用了 `select` 并设置了 Timeout 来进行轮询。虽然用了非阻塞模型，但这仍然在一个独立的 `std::thread` 中运行。
+*   **建议**：既然你的服务端用了 Sylar，你的客户端其实也可以引入一个轻量级的跨平台 EventLoop（比如 `libuv` 或者你把 sylar 的 iomanager 剥离到客户端），用 Epoll/Kqueue 替代 Select 做到真正的事件驱动，降低 CPU 占用。
+
+#### 4. 内存管理优化
+*   在 `ddt_servlet.cpp` 中，`Player` 被大量使用 `std::shared_ptr` 管理。在 C++ 游戏服务器中，玩家对象的频繁创建和销毁容易产生内存碎片。建议引入一个类似 `ObjectPool<Player>` 的对象池来复用内存。
+
+### 总结
+这是一个**可以直接写入大厂校招甚至社招简历核心位置的神仙项目**。它不仅涵盖了全栈架构，还深入了计算机图形学、游戏物理学和底层网络协议。如果你把上面提到的”地形前后端不一致”和”glReadPixels 性能瓶颈”修复，这个项目在技术深度上将几乎无懈可击。
+
+---
+
+## 11. 版本更新日志
+
+### v0.2 — Bug Fix & 体验优化
+
+**稳定性修复：**
+
+| # | 问题 | 根因 | 修复 |
+|---|------|------|------|
+| 1 | WebSocket 发送竞态闪退 | UI/IO 线程同时写 socket，帧数据交错 | `ws_client.h` 添加 `std::mutex`，`sendWSFrame` 加锁 |
+| 2 | ESC 退出 Segfault | `detach()` 放飞线程，主线程退出后访问已销毁对象 | `shutdown()` + `join()` 安全回收 |
+| 3 | 子弹贴在身上直接跳回合 | 物理起点在脚底，t=0 命中地形 | 枪口偏移 ±45px/X, -40px/Y |
+| 4 | 登录偶尔卡住 | MySQL 连接池耗尽阻塞协程 | 增加连接池大小和超时配置 |
+| 5 | 一方莫名退出 | Bug 1 的竞态导致帧损坏 | 同 Bug 1 的 mutex 修复 |
+| 6 | 服务端日志不落盘 | 仅控制台输出 | 添加 `FileLogAppender` → `logs/ddt_server.log` |
+| 7 | PING 帧导致 `invalid opcode` 断连 | sylar `ws_session.cc` 未消费 PING 的 mask+payload，帧错位 | PING/PONG 分支添加 `readFixSize` 消费数据 |
+| 8 | macOS Bus Error | RGB 纹理缺少行对齐设置 | `glPixelStorei(GL_UNPACK_ALIGNMENT, 1)` |
+
+**游戏体验优化：**
+
+| # | 改动 | 说明 |
+|---|------|------|
+| 9 | Mac Retina 屏幕适配 | 每帧 `glfwGetFramebufferSize` 获取物理像素尺寸，解决高 DPI 屏幕画面只占左下角 |
+| 10 | 重力系统 | 服务端出生 Y=0（天空），客户端添加 1500 重力加速度自由落体，着地停稳 |
+| 11 | 防连发开火 | 客户端 `m_hasShot` 锁 + 服务端 `m_playerShootLocked` 双重拦截，新回合重置 |
+
+**构建改进：**
+
+- CMake FetchContent 自动下载 Boost、yaml-cpp、GLFW、FreeType
+- `scripts/build.sh` 支持 `setup/server/client/all` 子命令
+
+详细修复记录见 [BugFix.md](BugFix.md)
+
+### v0.1 — 初始版本
+
+- OpenGL 3.3 客户端 + sylar WebSocket 服务端
+- 回合制弹道射击、房间系统、聊天系统
+- 账号注册/登录（MySQL + Redis）
+- Protobuf 通信协议
+- RPC 框架（Protobuf + ZooKeeper）

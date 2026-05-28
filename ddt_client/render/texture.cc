@@ -11,6 +11,7 @@ void Texture2D::Generate(GLuint width, GLuint height, unsigned char* data) {
     Height = height;
     glGenTextures(1, &ID);
     glBindTexture(GL_TEXTURE_2D, ID);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, InternalFormat, width, height, 0, ImageFormat, GL_UNSIGNED_BYTE, data);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, WrapS);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, WrapT);

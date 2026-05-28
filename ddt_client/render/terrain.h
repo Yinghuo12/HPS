@@ -26,6 +26,7 @@ private:
     bool m_initialized;
 
     std::vector<float> m_heightMap;
+    std::vector<GLubyte> m_pixels;
     float m_quadTemplate[6 * 8];  // pos(2) + uv(2) + color(4) per vertex
 };
 

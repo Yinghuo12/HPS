@@ -65,6 +65,8 @@ private:
 
     // Anti-cheat: per-turn move tracking
     std::map<uint32_t, float> m_playerMoveUsed;
+    // Anti-cheat: per-turn shoot lock
+    std::map<uint32_t, bool> m_playerShootLocked;
 
     sylar::Timer::ptr m_turnTimer;
 };

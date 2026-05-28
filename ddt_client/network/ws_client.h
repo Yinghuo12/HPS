@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <mutex>
 
 namespace ddt {
 
@@ -23,6 +24,7 @@ public:
 private:
     int m_fd;
     bool m_connected;
+    std::mutex m_frameMutex;
     std::string m_host;
     int m_port;
     std::string m_path;
