@@ -15,7 +15,7 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
 void cursorPosCallback(GLFWwindow* window, double xpos, double ypos);
 void framebufferSizeCallback(GLFWwindow* window, int width, int height);
 
-Game ddt(SCREEN_WIDTH, SCREEN_HEIGHT);
+Game g_game(SCREEN_WIDTH, SCREEN_HEIGHT);
 
 static void glfwErrorCallback(int code, const char* desc) {
     std::cerr << "GLFW Error (" << code << "): " << desc << std::endl;
@@ -67,7 +67,7 @@ int main() {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
-    ddt.Init();
+    g_game.Init();
 
     const GLfloat FIXED_DT = 1.0f / 60.0f;
     const GLfloat MAX_DT   = 0.25f;
@@ -94,16 +94,16 @@ int main() {
 
         accumulator += deltaTime;
         while (accumulator >= FIXED_DT) {
-            ddt.ProcessInput(FIXED_DT);
-            ddt.Update(FIXED_DT);
+            g_game.ProcessInput(FIXED_DT);
+            g_game.Update(FIXED_DT);
             accumulator -= FIXED_DT;
         }
 
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
-        ddt.Render();
+        g_game.Render();
 
-        ddt.RenderImGui();
+        g_game.RenderImGui();
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -111,7 +111,7 @@ int main() {
     }
 
     // Clean up game resources (network threads etc.) before GLFW
-    ddt.Shutdown();
+    g_game.Shutdown();
 
     // ImGui shutdown
     ImGui_ImplOpenGL3_Shutdown();
@@ -124,12 +124,12 @@ int main() {
 
 void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mode) {
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
-        ddt.m_quitRequested = true;
+        g_game.m_quitRequested = true;
     if (key >= 0 && key < 1024) {
         if (action == GLFW_PRESS)
-            ddt.Keys[key] = GL_TRUE;
+            g_game.Keys[key] = GL_TRUE;
         else if (action == GLFW_RELEASE)
-            ddt.Keys[key] = GL_FALSE;
+            g_game.Keys[key] = GL_FALSE;
     }
 }
 
@@ -139,14 +139,14 @@ void framebufferSizeCallback(GLFWwindow* window, int width, int height) {
 
 void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
     if (button == GLFW_MOUSE_BUTTON_LEFT) {
-        ddt.m_mousePressed = (action == GLFW_PRESS);
+        g_game.m_mousePressed = (action == GLFW_PRESS);
     }
     if (button == GLFW_MOUSE_BUTTON_RIGHT) {
-        ddt.m_rightMousePressed = (action == GLFW_PRESS);
+        g_game.m_rightMousePressed = (action == GLFW_PRESS);
     }
 }
 
 void cursorPosCallback(GLFWwindow* window, double xpos, double ypos) {
-    ddt.m_mouseX = xpos;
-    ddt.m_mouseY = ypos;
+    g_game.m_mouseX = xpos;
+    g_game.m_mouseY = ypos;
 }

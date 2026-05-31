@@ -58,7 +58,9 @@ void Terrain::Init() {
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    // 【修改点 2】：填充主像素数组，分配在成员变量 m_pixels 中
+    // 分配像素数组，填入地形颜色数据并上传到 GPU texture。
+    // 注意：不能延迟分配——Init 中就必须填充像素并 glTexSubImage2D。
+    // TODO(P3): 上传后可 shrink_to_fit() 释放，RemoveCircle 时再从 GPU 读回。
     m_pixels.resize(m_width * m_height * 4, 0);
     for (GLuint x = 0; x < m_width; x++) {
         float h = m_heightMap[x];
@@ -169,8 +171,6 @@ void Terrain::Draw(float camX, float camY, GLuint vpW, GLuint vpH) {
 
 void Terrain::RemoveCircle(float cx, float cy, float radius) {
     if (!m_initialized) return;
-
-    // 【修改点 3】：
     // 1. 同步更新客户端本地物理高度图，让 IsSolid 判断立刻生效，人物才能自然掉到坑里
     int r = static_cast<int>(radius);
     int x0_hm = std::max(0, static_cast<int>(cx - r));
@@ -183,7 +183,7 @@ void Terrain::RemoveCircle(float cx, float cy, float radius) {
         float halfW = std::sqrt(dx2);
         float bottomEdge = cy + halfW;
         if (m_heightMap[x] < bottomEdge) {
-            m_heightMap[x] = bottomEdge;
+            m_heightMap[x] = bottomEdge + 1.0f;  // +1.0f 与服务端 applyExplosion 保持一致，消除多轮爆炸后的地形漂移
         }
     }
 
@@ -233,4 +233,41 @@ bool Terrain::IsSolid(float x, float y) const {
     if (ix >= m_width || iy >= m_height) return false;
 
     return iy >= static_cast<GLuint>(m_heightMap[ix]);
+}
+
+void Terrain::Reset() {
+    if (!m_initialized) { Init(); return; }
+
+    // 1. 重新生成高度图
+    generateHeightMap();
+
+    // 2. 重新填充像素数据
+    m_pixels.clear();
+    m_pixels.resize(m_width * m_height * 4, 0);
+    for (GLuint x = 0; x < m_width; x++) {
+        float h = m_heightMap[x];
+        GLuint startY = static_cast<GLuint>(h);
+        for (GLuint y = startY; y < m_height; y++) {
+            GLuint idx = (y * m_width + x) * 4;
+            m_pixels[idx + 0] = 139;
+            m_pixels[idx + 1] = 119;
+            m_pixels[idx + 2] = 101;
+            m_pixels[idx + 3] = 255;
+        }
+    }
+    for (GLuint x = 0; x < m_width; x++) {
+        GLuint startY = static_cast<GLuint>(m_heightMap[x]);
+        for (int dy = 0; dy < 10 && startY + dy < m_height; dy++) {
+            GLuint idx = ((startY + dy) * m_width + x) * 4;
+            m_pixels[idx + 0] = 34;
+            m_pixels[idx + 1] = 139;
+            m_pixels[idx + 2] = 34;
+            m_pixels[idx + 3] = 255;
+        }
+    }
+
+    // 3. 上传到 GPU 纹理
+    glBindTexture(GL_TEXTURE_2D, m_texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_width, m_height, GL_RGBA, GL_UNSIGNED_BYTE, m_pixels.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
 }

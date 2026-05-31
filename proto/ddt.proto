@@ -18,9 +18,50 @@ enum TeamSide {
   TEAM_BLUE = 1;
 }
 
+// ---- 共享类型 ----
+message PlayerState {
+  uint32 id        = 1;
+  string name      = 2;
+  float  x         = 3;
+  float  y         = 4;
+  int32  hp        = 5;
+  int32  max_hp    = 6;
+  int32  angle     = 7;
+  int32  direction = 8;
+}
+
+message PlayerSlot {
+  uint32   player_id   = 1;
+  string   player_name = 2;
+  TeamSide team        = 3;
+  bool     ready       = 4;
+}
+
+message RoomInfo {
+  uint32             room_id       = 1;
+  string             room_name     = 2;
+  int32              player_count  = 3;
+  int32              max_players   = 4;
+  bool               game_started  = 5;
+  repeated PlayerSlot players      = 6;
+}
+
+message TrajectoryPoint {
+  float x = 1;
+  float y = 2;
+  float t = 3;
+}
+
+message PhysicsParamsMsg {
+  double air_factor     = 1;
+  double wind_factor    = 2;
+  double gravity_factor = 3;
+  double force_factor   = 4;
+}
+
+// ---- 顶层消息 ----
 message GameMessage {
   oneof payload {
-    // 原有消息 (1-13)
     LoginRequest       login_request       = 1;
     LoginResponse      login_response      = 2;
     JoinRoomRequest    join_room_request   = 3;
@@ -36,7 +77,6 @@ message GameMessage {
     ServerShutdownNotify server_shutdown_notify = 14;
     OpponentLeftNotify opponent_left_notify = 13;
 
-    // 账号 + 聊天 (20-30)
     RegisterRequest    register_request    = 20;
     RegisterResponse   register_response   = 21;
     ChatRequest        chat_request        = 22;
@@ -48,8 +88,7 @@ message GameMessage {
     FriendListRequest  friend_list_request = 28;
     FriendListResponse friend_list_response = 29;
     PrivateChatRequest private_chat_request = 30;
-
-    // 房间系统 (31-38)
+    
     RoomListRequest    room_list_request    = 31;
     RoomListResponse   room_list_response   = 32;
     CreateRoomRequest  create_room_request  = 33;
@@ -58,245 +97,55 @@ message GameMessage {
     ReadyRequest       ready_request        = 36;
     ReadyNotify        ready_notify         = 37;
     LeaveRoomRequest   leave_room_request   = 38;
-
-    // 队伍切换 (39-40)
+    
     SwitchTeamRequest  switch_team_request  = 39;
     SwitchTeamResponse switch_team_response = 40;
+    
+    HeartbeatRequest   heartbeat_request    = 41;
+    HeartbeatResponse  heartbeat_response   = 42;
+    
+    PassRequest        pass_request         = 43; // [新增] 玩家请求跳过回合
   }
 }
 
-// ---- 登录 ----
-message LoginRequest {
-  string name     = 1;
-  string password = 2;
-}
-
-message LoginResponse {
-  bool   ok    = 1;
-  uint32 id    = 2;
-  string msg   = 3;
-  string token = 4;
-}
-
-// ---- 注册 ----
-message RegisterRequest {
-  string name     = 1;
-  string password = 2;
-}
-
-message RegisterResponse {
-  bool   ok  = 1;
-  uint32 id  = 2;
-  string msg = 3;
-}
-
-// ---- 聊天 ----
-message ChatRequest {
-  ChannelType channel = 1;
-  string      message = 2;
-}
-
-message ChatNotify {
-  ChannelType channel     = 1;
-  uint32      sender_id   = 2;
-  string      sender_name = 3;
-  string      message     = 4;
-  uint64      timestamp   = 5;
-}
-
-message ChatHistoryRequest {
-  ChannelType channel = 1;
-  int32       count   = 2;
-}
-
-message ChatHistoryResponse {
-  ChannelType              channel  = 1;
-  repeated ChatNotify      messages = 2;
-}
-
-message PrivateChatRequest {
-  uint32 target_id = 1;
-  string message   = 2;
-}
-
-// ---- 好友 ----
-message FriendAddRequest {
-  string target_name = 1;
-}
-
-message FriendAddResponse {
-  bool   ok          = 1;
-  string msg         = 2;
-  uint32 friend_id   = 3;
-  string friend_name = 4;
-}
-
+message LoginRequest { string name = 1; string password = 2; }
+message LoginResponse { bool ok = 1; uint32 id = 2; string msg = 3; string token = 4; }
+message RegisterRequest { string name = 1; string password = 2; }
+message RegisterResponse { bool ok = 1; uint32 id = 2; string msg = 3; }
+message ChatRequest { ChannelType channel = 1; string message = 2; }
+message ChatNotify { ChannelType channel = 1; uint32 sender_id = 2; string sender_name = 3; string message = 4; uint64 timestamp = 5; }
+message ChatHistoryRequest { ChannelType channel = 1; int32 count = 2; }
+message ChatHistoryResponse { ChannelType channel = 1; repeated ChatNotify messages = 2; }
+message PrivateChatRequest { uint32 target_id = 1; string message = 2; }
+message FriendAddRequest { string target_name = 1; }
+message FriendAddResponse { bool ok = 1; string msg = 2; uint32 friend_id = 3; string friend_name = 4; }
 message FriendListRequest {}
-
-message FriendListResponse {
-  repeated FriendInfo friends = 1;
-}
-
-message FriendInfo {
-  uint32 id       = 1;
-  string name     = 2;
-  bool   online   = 3;
-  int32  level    = 4;
-}
-
-// ---- 房间 ----
-message JoinRoomRequest {
-  uint32   room_id = 1;  // 0 = 自动匹配
-  TeamSide team    = 2;  // 选择队伍
-}
-
-message JoinRoomResponse {
-  bool   ok       = 1;
-  uint32 room_id  = 2;
-  string msg      = 3;
-}
-
+message FriendListResponse { repeated FriendInfo friends = 1; }
+message FriendInfo { uint32 id = 1; string name = 2; bool online = 3; int32 level = 4; }
+message JoinRoomRequest { uint32 room_id = 1; TeamSide team = 2; }
+message JoinRoomResponse { bool ok = 1; uint32 room_id = 2; string msg = 3; }
 message RoomListRequest {}
-
-message RoomListResponse {
-  repeated RoomInfo rooms = 1;
-}
-
-message RoomInfo {
-  uint32             room_id       = 1;
-  string             room_name     = 2;
-  int32              player_count  = 3;
-  int32              max_players   = 4;
-  bool               game_started  = 5;
-  repeated PlayerSlot players      = 6;
-}
-
-message PlayerSlot {
-  uint32   player_id   = 1;
-  string   player_name = 2;
-  TeamSide team        = 3;
-  bool     ready       = 4;
-}
-
-message CreateRoomRequest {
-  string room_name = 1;
-}
-
-message CreateRoomResponse {
-  bool   ok       = 1;
-  uint32 room_id  = 2;
-  string msg      = 3;
-}
-
-message RoomUpdateNotify {
-  RoomInfo room_info = 1;
-}
-
-message ReadyRequest {
-  bool ready = 1;
-}
-
-message ReadyNotify {
-  uint32 player_id = 1;
-  bool   ready     = 2;
-}
-
+message RoomListResponse { repeated RoomInfo rooms = 1; }
+message CreateRoomRequest { string room_name = 1; }
+message CreateRoomResponse { bool ok = 1; uint32 room_id = 2; string msg = 3; }
+message RoomUpdateNotify { RoomInfo room_info = 1; }
+message ReadyRequest { bool ready = 1; }
+message ReadyNotify { uint32 player_id = 1; bool ready = 2; }
 message LeaveRoomRequest {}
+message SwitchTeamRequest { TeamSide team = 1; }
+message SwitchTeamResponse { bool ok = 1; string msg = 2; TeamSide team = 3; }
+message RoomReadyNotify { uint32 room_id = 1; PlayerState player1 = 2; PlayerState player2 = 3; float wind = 4; uint32 first_turn_id = 5; PhysicsParamsMsg physics_params = 6; float max_move_per_turn = 7; }
+message TurnStartNotify { uint32 turn_player_id = 1; float wind = 2; uint32 turn_number = 3; PlayerState player1 = 4; PlayerState player2 = 5; }
+message ShootRequest { int32 angle = 1; double force = 2; bool is_fly = 3; }
+message ShootResultNotify { uint32 shooter_id = 1; int32 angle = 2; double force = 3; float wind = 4; float hit_x = 6; float hit_y = 7; bool hit_player = 8; uint32 hit_player_id = 9; int32 damage = 10; PlayerState updated_player1 = 11; PlayerState updated_player2 = 12; enum DamageType { NORMAL=0; CRITICAL=1; BLOCK=2; } DamageType damage_type = 13; float start_x = 14; float start_y = 15; int32 direction = 16; bool is_fly = 17; }
+message MoveRequest { float delta_x = 1; }
+message MoveNotify { uint32 player_id = 1; float new_x = 2; }
+message GameOverNotify { uint32 winner_id = 1; string reason = 2; }
+message OpponentLeftNotify { uint32 player_id = 1; }
+message ErrorNotify { int32 code = 1; string msg = 2; }
+message ServerShutdownNotify { string reason = 1; }
+message HeartbeatRequest { uint64 client_time = 1; }
+message HeartbeatResponse { uint64 server_time = 1; }
 
-// 队伍切换
-message SwitchTeamRequest {
-  TeamSide team = 1;
-}
-
-message SwitchTeamResponse {
-  bool     ok  = 1;
-  string   msg = 2;
-  TeamSide team = 3;
-}
-
-// 双方就绪，游戏开始
-message RoomReadyNotify {
-  uint32      room_id        = 1;
-  PlayerState player1        = 2;
-  PlayerState player2        = 3;
-  float       wind           = 4;
-  uint32      first_turn_id  = 5;
-}
-
-// ---- 回合 ----
-message TurnStartNotify {
-  uint32 turn_player_id = 1;
-  float  wind           = 2;
-  uint32 turn_number    = 3;
-}
-
-// ---- 射击 ----
-message ShootRequest {
-  int32  angle = 1;
-  double force = 2;
-}
-
-message ShootResultNotify {
-  uint32           shooter_id      = 1;
-  int32            angle           = 2;
-  double           force           = 3;
-  float            wind            = 4;
-  repeated TrajectoryPoint points  = 5;
-  float            hit_x           = 6;
-  float            hit_y           = 7;
-  bool             hit_player      = 8;
-  uint32           hit_player_id   = 9;
-  int32            damage          = 10;
-  PlayerState      updated_player1 = 11;
-  PlayerState      updated_player2 = 12;
-  enum DamageType { NORMAL=0; CRITICAL=1; BLOCK=2; }
-  DamageType       damage_type     = 13;
-}
-
-message TrajectoryPoint {
-  float x = 1;
-  float y = 2;
-  float t = 3;
-}
-
-// ---- 移动 ----
-message MoveRequest {
-  float delta_x = 1;
-}
-
-message MoveNotify {
-  uint32 player_id = 1;
-  float  new_x     = 2;
-}
-
-// ---- 游戏结束 ----
-message GameOverNotify {
-  uint32 winner_id = 1;
-  string reason    = 2;
-}
-
-// ---- 杂项 ----
-message OpponentLeftNotify {
-  uint32 player_id = 1;
-}
-
-message ErrorNotify {
-  int32  code = 1;
-  string msg  = 2;
-}
-
-message ServerShutdownNotify {
-  string reason = 1;
-}
-
-// ---- 共享 ----
-message PlayerState {
-  uint32 id        = 1;
-  string name      = 2;
-  float  x         = 3;
-  float  y         = 4;
-  int32  hp        = 5;
-  int32  max_hp    = 6;
-  int32  angle     = 7;
-  int32  direction = 8;  // 0=left, 1=right
-}
+// [新增] 客户端跳过回合请求
+message PassRequest {}

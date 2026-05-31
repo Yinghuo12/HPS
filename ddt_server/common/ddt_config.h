@@ -66,6 +66,10 @@ struct GameConfig {
     int         redis_port = 6379;
     int         db_pool_size = 4;
 
+    // heartbeat
+    int heartbeat_timeout        = 45;   // 秒，超时剔除阈值
+    int heartbeat_check_interval = 10;   // 秒，扫描周期
+
 private:
     GameConfig() = default;
 };

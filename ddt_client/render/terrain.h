@@ -11,9 +11,11 @@ public:
     ~Terrain();
 
     void Init();
+    void Reset();  // 重新生成地形（新一局开始时调用）
     void Draw(float camX, float camY, GLuint vpW, GLuint vpH);
     void RemoveCircle(float cx, float cy, float radius);
     bool IsSolid(float x, float y) const;
+    const std::vector<float>& GetHeightMap() const { return m_heightMap; }
 
 private:
     void generateHeightMap();

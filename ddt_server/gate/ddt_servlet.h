@@ -2,9 +2,10 @@
 #define __DDT_SERVLET_H__
 
 #include "sylar/http/ws_servlet.h"
-#include <map>
-#include "sylar/thread.h"
-#include "ddt_player.h"
+#include "ddt_session_mgr.h"
+#include "sylar/timer.h"
+
+namespace ddt { class GameMessage; }
 
 namespace ddt {
 
@@ -25,12 +26,30 @@ public:
 private:
     void sendError(sylar::http::WSSession::ptr session, int code, const std::string& msg);
     void broadcastRoomListToAll();
-    void kickSession(sylar::http::WSSession* session);
+    void startHeartbeatTimer();
+    void checkHeartbeat();
 
-    sylar::RWMutex m_mutex;
-    std::map<sylar::http::WSSession*, Player::ptr> m_sessionPlayers;
-    std::map<uint64_t, sylar::http::WSSession*> m_accountSessions;  // accountId -> session
-    uint32_t m_nextPlayerId = 1;
+    // 各消息类型的独立处理器
+    void handleRegister(sylar::http::WSSession::ptr session, Player::ptr player, ddt::GameMessage& msg);
+    void handleLogin(sylar::http::WSSession::ptr session, Player::ptr player, ddt::GameMessage& msg);
+    void handleJoinRoom(sylar::http::WSSession::ptr session, Player::ptr player, ddt::GameMessage& msg);
+    void handleRoomList(sylar::http::WSSession::ptr session, Player::ptr player);
+    void handleCreateRoom(sylar::http::WSSession::ptr session, Player::ptr player, ddt::GameMessage& msg);
+    void handleReady(sylar::http::WSSession::ptr session, Player::ptr player, ddt::GameMessage& msg);
+    void handleLeaveRoom(sylar::http::WSSession::ptr session, Player::ptr player);
+    void handleSwitchTeam(sylar::http::WSSession::ptr session, Player::ptr player, ddt::GameMessage& msg);
+    void handleShoot(sylar::http::WSSession::ptr session, Player::ptr player, ddt::GameMessage& msg);
+    void handleMove(sylar::http::WSSession::ptr session, Player::ptr player, ddt::GameMessage& msg);
+    void handlePass(sylar::http::WSSession::ptr session, Player::ptr player, ddt::GameMessage& msg);
+    void handleChat(sylar::http::WSSession::ptr session, Player::ptr player, ddt::GameMessage& msg);
+    void handlePrivateChat(sylar::http::WSSession::ptr session, Player::ptr player, ddt::GameMessage& msg);
+    void handleChatHistory(sylar::http::WSSession::ptr session, Player::ptr player, ddt::GameMessage& msg);
+    void handleFriendAdd(sylar::http::WSSession::ptr session, Player::ptr player, ddt::GameMessage& msg);
+    void handleFriendList(sylar::http::WSSession::ptr session, Player::ptr player);
+    void handleHeartbeat(sylar::http::WSSession::ptr session);
+
+    SessionManager m_sessions;  // session 生命周期管理（从 servlet 解耦）
+    sylar::Timer::ptr m_heartbeatTimer;
 };
 
 } // namespace ddt

@@ -5,6 +5,7 @@
 #include <glm/glm.hpp>
 #include <string>
 #include <vector>
+#include <memory>
 #include "game_object.h"
 #include "sprite_renderer.h"
 #include "sprite_batch.h"
@@ -14,6 +15,11 @@
 #include "text_renderer.h"
 #include "camera.h"
 #include "particle_system.h"
+#include "common/ddt_physics.h"
+
+class GameHUD;          // forward declaration
+class GameNetwork;      // forward declaration
+class GameRenderer;     // forward declaration
 
 enum GameState {
     GAME_LOGIN,
@@ -66,14 +72,18 @@ public:
     void RenderImGui();
     void Shutdown();
 
-    GameObject* Players[2];
-    SpriteRenderer* Renderer;
-    SpriteBatch* Batch;
-    Terrain* GameTerrain;
+    friend class GameHUD;
+    friend class GameNetwork;
+    friend class GameRenderer;
+
+    std::unique_ptr<GameObject> Players[2];
+    std::unique_ptr<SpriteRenderer> Renderer;
+    std::unique_ptr<SpriteBatch> Batch;
+    std::unique_ptr<Terrain> GameTerrain;
     Projectile projectile;
-    ParticleEmitter* m_trailEmitter;
-    TextRenderer* Text;
-    Camera* m_camera;
+    std::unique_ptr<ParticleEmitter> m_trailEmitter;
+    std::unique_ptr<TextRenderer> Text;
+    std::unique_ptr<Camera> m_camera;
 
     int   CurrentAngle;
     int   OpponentAngle;
@@ -123,7 +133,6 @@ private:
     void renderMinimap();
     void updateCamera(float dt);
     float m_lastMoveTime;
-    bool m_imguiCharging;
     bool m_loggedIn;
     std::string m_password;
 
@@ -175,6 +184,17 @@ private:
     } m_pendingHit;
 
     float m_moveUsed; // 记录本回合玩家已行走的距离 (max: 200.0f)
+
+    int m_effectiveAngleMin = 20;
+    int m_effectiveAngleMax = 65;
+
+    // 服务端下发的物理参数，用于客户端本地弹道计算
+    ddt::PhysicsParams m_serverPhysics;
+    float m_maxMovePerTurn = 200.0f;  // 服务端下发的移动限额，替代硬编码
+
+    bool m_useFlyItem = false;  // 是否使用飞行道具
+    int  m_flyCooldown = 0;     // 飞行道具冷却时间，单位为回合数
+    bool m_projIsFly = false;   // 当前发射的弹道是否为飞行弹道
 };
 
 #endif

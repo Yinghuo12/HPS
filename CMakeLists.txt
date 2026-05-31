@@ -106,6 +106,10 @@ set(LIB_SRC
 add_library(sylar SHARED ${LIB_SRC})
 force_redefine_file_macro_for_sources(sylar) #__FILE__
 
+# === DDT 共享物理库（前后端共用）===
+add_library(ddt_physics_common STATIC common/ddt_physics.cc)
+target_include_directories(ddt_physics_common PUBLIC ${CMAKE_SOURCE_DIR})
+
 # 统一链接所有以来库
 set(DEPS_LIBS
     sylar

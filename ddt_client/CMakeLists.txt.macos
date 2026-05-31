@@ -58,16 +58,23 @@ set(DDT_PB_DIR ${CMAKE_BINARY_DIR}/ddt/proto)
 set(CLIENT_SRC
     src/main.cc
     src/game.cc
+    src/game_hud.cc
+    src/game_network.cc
+    src/game_renderer.cc
+    src/game_object.cc
     src/shader.cc
     src/texture.cc
     src/resource_manager.cc
     src/sprite_renderer.cc
-    src/game_object.cc
+    src/sprite_batch.cc
     src/terrain.cc
     src/projectile.cc
     src/text_renderer.cc
+    src/camera.cc
+    src/particle_system.cc
     src/ws_client.cc
     src/network_client_portable.cc
+    src/common/ddt_physics.cc
     ${DDT_PB_DIR}/ddt.pb.cc
     ${IMGUI_SRC}
     ${GLAD_SRC}

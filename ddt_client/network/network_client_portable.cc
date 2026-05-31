@@ -245,11 +245,12 @@ void NetworkClient::sendFriendAdd(const std::string& target_name) {
     }
 }
 
-void NetworkClient::sendShoot(int angle, double force) {
+void NetworkClient::sendShoot(int angle, double force, bool is_fly) {
     ddt::GameMessage msg;
     auto* req = msg.mutable_shoot_request();
     req->set_angle(angle);
     req->set_force(force);
+    req->set_is_fly(is_fly);
     std::string data;
     msg.SerializeToString(&data);
     std::lock_guard<std::mutex> lock(m_sendMutex);
@@ -270,10 +271,35 @@ void NetworkClient::sendMove(float delta_x) {
     }
 }
 
+void NetworkClient::sendPass() {
+    ddt::GameMessage msg;
+    msg.mutable_pass_request();
+    std::string data;
+    msg.SerializeToString(&data);
+    std::lock_guard<std::mutex> lock(m_sendMutex);
+    if (auto* ws = static_cast<WSClient*>(m_wsClient)) {
+        ws->sendBinary(data);
+    }
+}
+
 void NetworkClient::sendPing() {
     std::lock_guard<std::mutex> lock(m_sendMutex);
     if (auto* ws = static_cast<WSClient*>(m_wsClient)) {
         ws->sendPing();
+    }
+}
+
+void NetworkClient::sendHeartbeat() {
+    ddt::GameMessage msg;
+    auto* hb = msg.mutable_heartbeat_request();
+    (void)hb;
+
+    std::string data;
+    msg.SerializeToString(&data);
+
+    std::lock_guard<std::mutex> lock(m_sendMutex);
+    if (auto* ws = static_cast<WSClient*>(m_wsClient)) {
+        ws->sendBinary(data);
     }
 }
 

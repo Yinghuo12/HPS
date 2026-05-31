@@ -65,6 +65,7 @@ endif()
 # --- 头文件 ---
 include_directories(
     ${DDT_SRC}
+    ${DDT_SRC}/common
     ${DDT_TP}/glad/include
     ${DDT_TP}/stb
     ${DDT_TP}/imgui
@@ -89,6 +90,9 @@ set(IMGUI_SRC
 set(CLIENT_SRC
     ${DDT_SRC}/main.cc
     ${DDT_SRC}/game.cc
+    ${DDT_SRC}/game_hud.cc
+    ${DDT_SRC}/game_network.cc
+    ${DDT_SRC}/game_renderer.cc
     ${DDT_SRC}/game_object.cc
     ${DDT_SRC}/projectile.cc
     ${DDT_SRC}/shader.cc
@@ -102,6 +106,7 @@ set(CLIENT_SRC
     ${DDT_SRC}/particle_system.cc
     ${DDT_SRC}/ws_client.cc
     ${DDT_SRC}/network_client.cc
+    ${DDT_SRC}/common/ddt_physics.cc
     ${DDT_PB_DIR}/ddt.pb.cc
     ${IMGUI_SRC}
     ${GLAD_SRC}

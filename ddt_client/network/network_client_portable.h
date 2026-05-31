@@ -22,6 +22,12 @@ public:
     bool connect(const std::string& url = "ws://127.0.0.1:8073/ddt/game");
     void disconnect();
 
+    // 自动重连（portable stub — 实际重连由 Game::Update 驱动）
+    void enableAutoReconnect(const std::string& url) { m_reconnectUrl = url; m_autoReconnect = true; }
+    void disableAutoReconnect() { m_autoReconnect = false; }
+    bool shouldAutoReconnect() const { return m_autoReconnect && !m_connected && !m_reconnectUrl.empty(); }
+    const std::string& getReconnectUrl() const { return m_reconnectUrl; }
+
     void sendLogin(const std::string& name, const std::string& password = "");
     void sendRegister(const std::string& name, const std::string& password);
     void sendJoinRoom(uint32_t room_id = 0, int team = 0);
@@ -32,12 +38,14 @@ public:
     void sendLeaveRoom();
     void sendFriendList();
     void sendFriendAdd(const std::string& target_name);
-    void sendShoot(int angle, double force);
+    void sendShoot(int angle, double force, bool is_fly);
     void sendMove(float delta_x);
+    void sendPass(); // [新增] 跳过回合
     void sendChat(int channel, const std::string& message);
     void sendPrivateChat(uint32_t targetId, const std::string& message);
     void sendChatHistory(int channel, int count = 50);
     void sendPing();
+    void sendHeartbeat();
 
     void setCallback(MessageCallback cb);
 
@@ -57,6 +65,10 @@ private:
     std::unique_ptr<std::thread> m_ioThread;
     bool m_connected = false;
     MessageCallback m_callback;
+
+    // 自动重连
+    bool m_autoReconnect = false;
+    std::string m_reconnectUrl;
 };
 
 } // namespace ddt

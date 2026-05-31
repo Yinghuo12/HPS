@@ -1,5 +1,6 @@
 #include <csignal>
 #include <atomic>
+#include <unistd.h>
 #include "sylar/log.h"
 #include "sylar/iomanager.h"
 #include "sylar/http/ws_server.h"
@@ -15,9 +16,15 @@ static ddt::DDTWSServlet::ptr s_ddt_servlet;
 // 1. 使用原子布尔变量作为退出标记。
 // 信号处理函数必须保持绝对的简洁，不能有任何锁、日志和 hook 的系统调用。
 static std::atomic<bool> g_quit{false};
+static std::atomic<int> g_quitCount{0};
 
 static void gracefulShutdown(int signum) {
-    // 仅仅置位，然后立即返回，把真正退出的脏活累活交给主协程调度器去做
+    g_quitCount++;
+    if (g_quitCount >= 2) {
+        // 第二次 Ctrl+C：强制退出
+        _exit(0);
+    }
+    // 第一次：仅仅置位，交给定时器做优雅退出
     g_quit = true;
 }
 
@@ -47,7 +54,23 @@ int main(int argc, char** argv) {
     // Load game config
     auto& config = ddt::GameConfig::Instance();
     std::string confPath = "conf/game.yml";
-    if (argc > 1) confPath = argv[1];
+    if (argc > 1) {
+        confPath = argv[1];
+    } else {
+        // 尝试多个路径查找配置文件（支持从不同目录启动）
+        const char* candidates[] = {
+            "conf/game.yml",
+            "../conf/game.yml",
+            "../../conf/game.yml",
+            nullptr
+        };
+        for (int i = 0; candidates[i]; ++i) {
+            if (access(candidates[i], F_OK) == 0) {
+                confPath = candidates[i];
+                break;
+            }
+        }
+    }
     if (!config.load(confPath)) {
         SYLAR_LOG_WARN(g_logger) << "Using default config values";
     }

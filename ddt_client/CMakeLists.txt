@@ -103,6 +103,9 @@ set(DDT_PB_DIR ${CMAKE_BINARY_DIR}/proto)
 set(CLIENT_SRC
     main.cc
     logic/game.cc
+    logic/game_hud.cc
+    logic/game_network.cc
+    logic/game_renderer.cc
     logic/game_object.cc
     logic/projectile.cc
     network/network_client.cc
@@ -133,6 +136,7 @@ target_link_libraries(ddt_client
     protobuf
     ${FREETYPE_LIB}
     sylar
+    ddt_physics_common
     yaml-cpp
     ssl
     crypto

@@ -27,6 +27,8 @@ build_release() {
 
     # 源码（flat into src/）
     for f in main.cc game.h game.cc game_object.h game_object.cc \
+             game_hud.h game_hud.cc game_network.h game_network.cc \
+             game_renderer.h game_renderer.cc \
              shader.h shader.cc texture.h texture.cc \
              resource_manager.h resource_manager.cc \
              sprite_renderer.h sprite_renderer.cc \
@@ -60,6 +62,13 @@ build_release() {
     elif [ -f "$SRC/network/network_client.h" ]; then
         cp "$SRC/network/network_client.h"  "$OUTDIR/src/network_client.h"
         cp "$SRC/network/network_client.cc" "$OUTDIR/src/network_client.cc"
+    fi
+
+    # 共享代码层 (common)
+    if [ -d "$BASE/common" ]; then
+        mkdir -p "$OUTDIR/src/common"
+        cp "$BASE/common/"*.h "$OUTDIR/src/common/"
+        cp "$BASE/common/"*.cc "$OUTDIR/src/common/"
     fi
 
     # 第三方库

@@ -53,3 +53,7 @@ server:
   db_pool_size: 4
   redis_host: "127.0.0.1"
   redis_port: 6379
+
+heartbeat:
+  timeout: 45
+  check_interval: 10

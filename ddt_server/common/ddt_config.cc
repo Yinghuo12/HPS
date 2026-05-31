@@ -80,6 +80,11 @@ bool GameConfig::load(const std::string& path) {
         if (n["db_pool_size"])  db_pool_size  = n["db_pool_size"].as<int>();
     }
 
+    if (auto n = root["heartbeat"]) {
+        if (n["timeout"])        heartbeat_timeout        = n["timeout"].as<int>();
+        if (n["check_interval"]) heartbeat_check_interval = n["check_interval"].as<int>();
+    }
+
     std::cout << "Config loaded from " << path << std::endl;
     return true;
 }

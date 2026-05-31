@@ -16,11 +16,13 @@ Projectile::Projectile()
 void Projectile::Start(const std::vector<TrajectoryPoint>& points) {
     m_points = points;
     m_elapsedTime = 0.0f;
-    m_active = true;
     m_finished = false;
-    if (!points.empty()) {
-        m_currentPos = glm::vec2(points[0].x, points[0].y);
+    if (points.empty()) {
+        m_active = false;  // 空轨迹不激活，防止 Update 中卡死
+        return;
     }
+    m_active = true;
+    m_currentPos = glm::vec2(points[0].x, points[0].y);
 }
 
 void Projectile::Update(float dt) {

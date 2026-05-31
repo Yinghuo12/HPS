@@ -64,4 +64,6 @@ message RoomReadyNotify {
   PlayerState player2        = 3;
   float       wind           = 4;
   uint32      first_turn_id  = 5;
+  PhysicsParamsMsg physics_params = 6;
+  float       max_move_per_turn = 7;  // 服务端下发的移动限额，客户端不再硬编码
 }
