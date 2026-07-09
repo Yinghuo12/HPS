@@ -6,9 +6,9 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
-#include "http.h"
-#include "http_session.h"
-#include "sylar/thread.h"
+#include "sylar/http/http.h"
+#include "sylar/http/http_session.h"
+#include "sylar/core/thread.h"
 
 namespace sylar {
 namespace http {

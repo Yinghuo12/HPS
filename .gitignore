@@ -1,6 +1,6 @@
 # Build output
 build/
-dist/
+packaging/dist/
 
 # Compiled binaries and libraries
 bin/ddt_client
@@ -19,11 +19,11 @@ lib/*.a
 lib/*.so
 *.o
 
-# Framework deps — too large, install via system packages
+# Bundled third-party header deps — too large, install via system packages
 # boost: sudo apt install libboost-all-dev
 # yaml-cpp: sudo apt install libyaml-cpp-dev
-framework/include/boost/
-framework/include/yaml-cpp/
+thirdparty/include/boost/
+thirdparty/include/yaml-cpp/
 
 # Thirdparty git dirs (keep source, remove .git)
 thirdparty/*/.git/

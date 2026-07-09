@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.14)
 project(sylar)
 
 include(FetchContent)
-include(framework/cmake/utils.cmake)
+include(cmake/utils.cmake)
 
 set(CMAKE_VERBOSE_MAKEFILE ON)
 set(CMAKE_CXX_FLAGS "$ENV{CXXFLAGS} -rdynamic -O0 -ggdb -std=c++11 -Wall -Wno-deprecated -Werror -Wno-unused-function -Wno-builtin-macro-redefined -Wno-deprecated-declarations -Wno-pessimizing-move")
@@ -13,12 +13,12 @@ include_directories(${OPENGL_INCLUDE_DIR})
 
 # === 头文件 ===
 include_directories(.)
-include_directories(./framework/include)
-include_directories(./framework/include/jsoncpp)
+include_directories(./thirdparty/include)
+include_directories(./thirdparty/include/jsoncpp)
 
 # === Boost (headers) ===
-if(EXISTS "${CMAKE_SOURCE_DIR}/framework/include/boost/boost")
-    include_directories(./framework/include/boost)
+if(EXISTS "${CMAKE_SOURCE_DIR}/thirdparty/include/boost/boost")
+    include_directories(./thirdparty/include/boost)
     message(STATUS "Boost: using local headers")
 else()
     find_package(Boost QUIET)
@@ -37,8 +37,8 @@ else()
 endif()
 
 # === yaml-cpp ===
-if(EXISTS "${CMAKE_SOURCE_DIR}/framework/include/yaml-cpp/yaml-cpp")
-    include_directories(./framework/include/yaml-cpp)
+if(EXISTS "${CMAKE_SOURCE_DIR}/thirdparty/include/yaml-cpp/yaml-cpp")
+    include_directories(./thirdparty/include/yaml-cpp)
     set(YAML_CPP_LINK "-lyaml-cpp")
     message(STATUS "yaml-cpp: using local copy")
 else()
@@ -63,52 +63,45 @@ endif()
 link_directories(./lib)
 
 
-# 源文件
-set(LIB_SRC
-    sylar/log.cc
-    sylar/util.cc
-    sylar/util/hash_util.cc
-    sylar/config.cc
-    sylar/thread.cc
-    sylar/fiber.cc
-    sylar/scheduler.cc
-    sylar/iomanager.cc
-    sylar/timer.cc
-    sylar/hook.cc
-    sylar/fd_manager.cc
-    sylar/address.cc
-    sylar/socket.cc
-    sylar/bytearray.cc
-    sylar/http/http.cc
-    sylar/http/http11_parser.rl.cc
-    sylar/http/httpclient_parser.rl.cc
-    sylar/http/http_parser.cc
-    sylar/tcp_server.cc
-    sylar/stream.cc
-    sylar/socket_stream.cc
-    sylar/http/http_session.cc
-    sylar/http/http_server.cc
-    sylar/http/servlet.cc
-    sylar/http/ws_connection.cc
-    sylar/http/ws_server.cc
-    sylar/http/ws_session.cc
-    sylar/http/ws_servlet.cc
-    sylar/http/http_connection.cc
-    sylar/uri.rl.cc
-    sylar/daemon.cc
-    sylar/env.cc
-    sylar/asynclog.cc  # 二次开发异步日志
-    sylar/util/json_util.cc
-)
+# 源文件：各子目录通过 sylar_add_sources() 把 .cc 累积到全局属性 sylar_sources，
+# 此处统一取回编入单 SHARED 库。路径为仓库相对路径（如 sylar/core/log.cc），
+# 与原扁平 LIB_SRC 形态一致，__FILE__ 与 .o 命名行为不变。
+# 层级依赖：util/(叶) ← core/ ← scheduler/ ← net/ ← http/orm/rpc/
+set(SYLAR_SOURCES "")
+add_subdirectory(sylar/core)
+add_subdirectory(sylar/util)
+add_subdirectory(sylar/scheduler)
+add_subdirectory(sylar/net)
+add_subdirectory(sylar/http)
+add_subdirectory(sylar/orm)
+get_property(SYLAR_SOURCES GLOBAL PROPERTY sylar_sources)
 
 
 # 编译库
-add_library(sylar SHARED ${LIB_SRC})
+add_library(sylar SHARED ${SYLAR_SOURCES})
 force_redefine_file_macro_for_sources(sylar) #__FILE__
 
+# libsylar.so 自带其依赖的 DT_NEEDED：链接 sylar 的目标无需再显式罗列 mysqlclient/z/zstd/resolv 等，
+# 修正 ddt_client 等仅链接 sylar 的消费者链接失败（PUBLIC：同时上抛给消费者，最稳）。
+target_link_libraries(sylar PUBLIC
+    ${YAML_CPP_LINK}
+    -lpthread
+    -ldl
+    -lssl
+    -lcrypto
+    -ljsoncpp
+    -lmysqlclient
+    -lz
+    -lzstd
+    -lresolv)
+
+# rpc 源【不并入 libsylar】（仅 rpc_test 直接编译，避免重复符号）；
+# 此处仅把 RPC_SRC 列表上抛到根作用域，须早于下方 rpc_test_callee/rpc_test_caller。
+add_subdirectory(sylar/rpc)
+
 # === DDT 共享物理库（前后端共用）===
-add_library(ddt_physics_common STATIC common/ddt_physics.cc)
-target_include_directories(ddt_physics_common PUBLIC ${CMAKE_SOURCE_DIR})
+add_library(ddt_physics_common STATIC src/common/ddt_physics.cc)
+target_include_directories(ddt_physics_common PUBLIC ${CMAKE_SOURCE_DIR}/src)
 
 # 统一链接所有以来库
 set(DEPS_LIBS
@@ -119,46 +112,51 @@ set(DEPS_LIBS
     -lssl
     -lcrypto
     -ljsoncpp
+    -lmysqlclient
+    -lz
+    -lzstd
+    -lresolv
 )
 
 
 
 # 测试程序
-add_executable(test framework/tests/test.cc)
-add_executable(test_config framework/tests/test_config.cc)
-add_executable(test_thread framework/tests/test_thread.cc)
-add_executable(test_util framework/tests/test_util.cc)
-add_executable(test_fiber framework/tests/test_fiber.cc)
-add_executable(test_scheduler framework/tests/test_scheduler.cc)
-add_executable(test_iomanager framework/tests/test_iomanager.cc)
-add_executable(test_timer framework/tests/test_timer.cc)
-add_executable(test_hook framework/tests/test_hook.cc)
-add_executable(test_address framework/tests/test_address.cc)
-add_executable(test_socket framework/tests/test_socket.cc)
-add_executable(test_bytearray framework/tests/test_bytearray.cc)
-add_executable(test_http framework/tests/test_http.cc)
-add_executable(test_http_parser framework/tests/test_http_parser.cc)
-add_executable(test_tcp_server framework/tests/test_tcp_server.cc)
+add_executable(test tests/test.cc)
+add_executable(test_config tests/test_config.cc)
+add_executable(test_thread tests/test_thread.cc)
+add_executable(test_util tests/test_util.cc)
+add_executable(test_fiber tests/test_fiber.cc)
+add_executable(test_scheduler tests/test_scheduler.cc)
+add_executable(test_iomanager tests/test_iomanager.cc)
+add_executable(test_timer tests/test_timer.cc)
+add_executable(test_hook tests/test_hook.cc)
+add_executable(test_address tests/test_address.cc)
+add_executable(test_socket tests/test_socket.cc)
+add_executable(test_bytearray tests/test_bytearray.cc)
+add_executable(test_http tests/test_http.cc)
+add_executable(test_http_parser tests/test_http_parser.cc)
+add_executable(test_tcp_server tests/test_tcp_server.cc)
 add_executable(echo_server sylar/examples/echo_server.cc)
-add_executable(test_http_server framework/tests/test_http_server.cc)
-add_executable(test_http_connection framework/tests/test_http_connection.cc)
-add_executable(test_uri framework/tests/test_uri.cc)
-add_executable(my_http_server framework/samples/my_http_server.cc)
-add_executable(test_daemon framework/tests/test_daemon.cc)
-add_executable(test_env framework/tests/test_env.cc)
-add_executable(test_asynclog framework/tests/test_asynclog.cc)  # 二次开发异步日志
+add_executable(test_http_server tests/test_http_server.cc)
+add_executable(test_http_connection tests/test_http_connection.cc)
+add_executable(test_uri tests/test_uri.cc)
+add_executable(my_http_server sylar/examples/my_http_server.cc)
+add_executable(test_daemon tests/test_daemon.cc)
+add_executable(test_env tests/test_env.cc)
+add_executable(test_asynclog tests/test_asynclog.cc)  # 二次开发异步日志
+add_executable(test_orm tests/test_orm.cc)  # ORM 模块自测
 add_executable(echo_server_udp sylar/examples/echo_server_udp.cc)
 add_executable(echo_client_udp sylar/examples/echo_client_udp.cc)
-add_executable(test_ws_server framework/tests/test_ws_server.cc)
-add_executable(test_ws_client framework/tests/test_ws_client.cc)
-add_executable(chat_room framework/chat/chat_main.cc framework/chat/protocol.cc framework/chat/resource_servlet.cc framework/chat/chat_servlet.cc)
+add_executable(test_ws_server tests/test_ws_server.cc)
+add_executable(test_ws_client tests/test_ws_client.cc)
+add_executable(chat_room sylar/examples/chat/chat_main.cc sylar/examples/chat/protocol.cc sylar/examples/chat/resource_servlet.cc sylar/examples/chat/chat_servlet.cc)
 
 # DDT 游戏客户端（独立构建，不使用框架的 -Werror）
-add_subdirectory(ddt_client)
+add_subdirectory(src/client)
 
 # === Protobuf for DDT game ===
 find_package(Protobuf REQUIRED)
-set(DDT_PROTO_DIR ${CMAKE_SOURCE_DIR}/proto)
+set(DDT_PROTO_DIR ${CMAKE_SOURCE_DIR}/src/proto)
 set(DDT_PB_DIR ${CMAKE_BINARY_DIR}/proto)
 file(MAKE_DIRECTORY ${DDT_PB_DIR})
 
@@ -175,7 +173,7 @@ add_custom_command(
 add_custom_target(ddt_pb DEPENDS ${DDT_PB_DIR}/ddt.pb.cc ${DDT_PB_DIR}/ddt.pb.h)
 
 # DDT 游戏服务器
-add_subdirectory(ddt_server)
+add_subdirectory(src/server)
 
 
 # === RPC framework ===
@@ -196,9 +194,9 @@ add_custom_command(
     OUTPUT ${RPC_PB_DIR}/test.pb.cc ${RPC_PB_DIR}/test.pb.h
     COMMAND ${Protobuf_PROTOC_EXECUTABLE}
         --cpp_out=${RPC_PB_DIR}
-        --proto_path=${CMAKE_SOURCE_DIR}/framework/tests/rpc_test
-        ${CMAKE_SOURCE_DIR}/framework/tests/rpc_test/test.proto
-    DEPENDS ${CMAKE_SOURCE_DIR}/framework/tests/rpc_test/test.proto
+        --proto_path=${CMAKE_SOURCE_DIR}/tests/rpc_test
+        ${CMAKE_SOURCE_DIR}/tests/rpc_test/test.proto
+    DEPENDS ${CMAKE_SOURCE_DIR}/tests/rpc_test/test.proto
     COMMENT "Generating RPC test protobuf"
 )
 
@@ -209,15 +207,10 @@ add_custom_target(rpc_pb DEPENDS
 
 include_directories(${RPC_PB_DIR})
 
-set(RPC_SRC
-    ${CMAKE_SOURCE_DIR}/sylar/rpc/rpc_controller.cc
-    ${CMAKE_SOURCE_DIR}/sylar/rpc/rpc_provider.cc
-    ${CMAKE_SOURCE_DIR}/sylar/rpc/rpc_channel.cc
-    ${CMAKE_SOURCE_DIR}/sylar/zk_client.cc
-)
+# RPC_SRC 已由 sylar/rpc/CMakeLists.txt（上方 add_subdirectory(sylar/rpc)）提供
 
 add_executable(rpc_test_callee
-    framework/tests/rpc_test/rpc_callee.cc
+    tests/rpc_test/rpc_callee.cc
     ${RPC_SRC}
     ${RPC_PB_DIR}/test.pb.cc
     ${RPC_PB_DIR}/rpcheader.pb.cc
@@ -226,7 +219,7 @@ add_dependencies(rpc_test_callee rpc_pb sylar)
 target_link_libraries(rpc_test_callee ${DEPS_LIBS} ${Protobuf_LIBRARIES} -lzookeeper_mt)
 
 add_executable(rpc_test_caller
-    framework/tests/rpc_test/rpc_caller.cc
+    tests/rpc_test/rpc_caller.cc
     ${RPC_SRC}
     ${RPC_PB_DIR}/test.pb.cc
     ${RPC_PB_DIR}/rpcheader.pb.cc
@@ -304,6 +297,9 @@ target_link_libraries(test_env sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_asynclog) #__FILE__
 target_link_libraries(test_asynclog sylar ${DEPS_LIBS})
+
+force_redefine_file_macro_for_sources(test_orm) #__FILE__
+target_link_libraries(test_orm sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(echo_server_udp) #__FILE__
 target_link_libraries(echo_server_udp sylar ${DEPS_LIBS})

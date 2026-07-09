@@ -1,8 +1,8 @@
 #ifndef __SYLAR_HTTP_SESSION_H__
 #define __SYLAR_HTTP_SESSION_H__
 
-#include "sylar/socket_stream.h"
-#include "http.h"
+#include "sylar/net/socket_stream.h"
+#include "sylar/http/http.h"
 
 namespace sylar {
 namespace http {

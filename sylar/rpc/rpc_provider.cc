@@ -1,7 +1,7 @@
 #include "rpc_provider.h"
 #include "rpcheader.pb.h"
-#include "sylar/log.h"
-#include "sylar/endian.h"
+#include "sylar/core/log.h"
+#include "sylar/core/endian.h"
 
 #include <google/protobuf/descriptor.h>
 

@@ -5,9 +5,9 @@
 #include <memory>
 #include <unordered_map>
 
-#include "sylar/tcp_server.h"
-#include "sylar/socket_stream.h"
-#include "sylar/zk_client.h"
+#include "sylar/net/tcp_server.h"
+#include "sylar/net/socket_stream.h"
+#include "sylar/rpc/zk_client.h"
 
 namespace sylar {
 namespace rpc {

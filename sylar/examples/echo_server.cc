@@ -1,9 +1,9 @@
 
-#include "sylar/tcp_server.h"
-#include "sylar/log.h"
-#include "sylar/iomanager.h"
-#include "sylar/bytearray.h"
-#include "sylar/address.h"
+#include "sylar/net/tcp_server.h"
+#include "sylar/core/log.h"
+#include "sylar/scheduler/iomanager.h"
+#include "sylar/net/bytearray.h"
+#include "sylar/net/address.h"
 
 static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
 

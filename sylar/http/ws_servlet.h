@@ -1,9 +1,9 @@
 #ifndef __HTTP_WS_SERVLET_H__
 #define __HTTP_WS_SERVLET_H__
 
-#include "ws_session.h"
-#include "sylar/thread.h"
-#include "servlet.h"
+#include "sylar/http/ws_session.h"
+#include "sylar/core/thread.h"
+#include "sylar/http/servlet.h"
 
 namespace sylar {
 namespace http {
