@@ -1,0 +1,172 @@
+syntax = "proto3";
+package ddt;
+
+import "common.proto";
+
+// cc_generic_services=true: 让 protoc 为 service 生成 C++ 基类(Service/Stub),
+// sylar RpcProvider 基于 google::protobuf::Service 派发。
+option cc_generic_services = true;
+
+// ============================================================
+// 服务间 RPC (sylar RpcProvider / RpcChannel + etcd 发现)
+//
+// 每个服务在 etcd 注册为 /services/{name} -> host:port
+// 服务发现: 调用方用 RpcChannel(etcd) 解析。
+// 命名约定: {方法名} = "/{Service}/{Method}" (rpc_provider 路由约定)
+// ============================================================
+
+// ------------------------------------------------------------
+// LoginService (login 服提供; gate / 其他服务调用)
+// ------------------------------------------------------------
+service LoginService {
+  // 校验 token, 返回 accountId + name。gate 连接首包用。
+  rpc ValidateToken(ValidateTokenReq) returns (ValidateTokenResp);
+  // 注册账号(也经网关转发到 login)。密码 SHA256+salt 落 data 服。
+  rpc Register(RegisterRpcReq) returns (RegisterRpcResp);
+  // 登录(HTTP /login 内部调用), 返回 token
+  rpc Login(LoginRpcReq) returns (LoginRpcResp);
+}
+message ValidateTokenReq  { string token = 1; }
+message ValidateTokenResp { Result result = 1; uint64 account_id = 2; string name = 3; string msg = 4; }
+message RegisterRpcReq    { string name = 1; string password = 2; }
+message RegisterRpcResp   { Result result = 1; uint64 account_id = 2; string msg = 3; }
+message LoginRpcReq       { string name = 1; string password = 2; }
+message LoginRpcResp      { Result result = 1; uint64 account_id = 2; string token = 3; string msg = 4; }
+
+// ------------------------------------------------------------
+// DataService (data 服提供; login/lobby/battle 调用)
+// 唯一持久化入口。token 存取也在此(Redis)。
+// ------------------------------------------------------------
+service DataService {
+  // 账号
+  rpc CreateAccount(CreateAccountReq) returns (CreateAccountResp);
+  rpc GetAccountByName(NameReq) returns (AccountRow);
+  rpc GetAccountById(IdReq) returns (AccountRow);
+  rpc VerifyPassword(VerifyPwdReq) returns (VerifyPwdResp);   // SHA256+salt 校验
+  rpc UpdateGender(UpdateGenderReq) returns (ResultResp);     // 设置性别/角色
+
+  // 档案
+  rpc GetProfile(IdReq) returns (ProfileRow);
+  rpc UpdateWinLoss(UpdateWinLossReq) returns (ResultResp);
+
+  // token (Redis)
+  rpc SaveToken(SaveTokenReq) returns (ResultResp);
+  rpc LoadToken(TokenReq) returns (TokenResp);    // 返回 accountId, 0=无效
+  rpc DeleteToken(TokenReq) returns (ResultResp);
+
+  // 战绩
+  rpc SaveGameRecord(GameRecordReq) returns (ResultResp);
+
+  // 好友
+  rpc AddFriend(AddFriendReq) returns (ResultResp);
+  rpc GetFriendList(IdReq) returns (FriendListRpcResp);
+
+  // 聊天记录
+  rpc SaveChat(SaveChatReq) returns (ResultResp);
+  rpc GetChatHistory(GetChatHistoryReq) returns (ChatHistoryRespRpc);
+  rpc GetPrivateHistory(GetPrivateHistoryReq) returns (ChatHistoryRespRpc);
+}
+message CreateAccountReq { string name = 1; string password_hash = 2; string salt = 3; }
+message CreateAccountResp{ Result result = 1; uint64 account_id = 2; string msg = 3; }
+message NameReq          { string name = 1; }
+message IdReq            { uint64 account_id = 1; }
+message AccountRow       { Result result = 1; uint64 account_id = 2; string name = 3; string password_hash = 4; string salt = 5; Gender gender = 6; }
+message UpdateGenderReq  { uint64 account_id = 1; Gender gender = 2; }
+message VerifyPwdReq     { uint64 account_id = 1; string password_hash = 2; }  // password_hash = sha256(password+salt)
+message VerifyPwdResp    { Result result = 1; }   // SUCCESS=匹配
+message ProfileRow       { Result result = 1; uint64 account_id = 2; string nickname = 3; int32 level = 4; int32 wins = 5; int32 losses = 6; }
+message UpdateWinLossReq { uint64 account_id = 1; bool win = 2; }
+message ResultResp       { Result result = 1; string msg = 2; }
+message SaveTokenReq     { string token = 1; uint64 account_id = 2; int32 ttl_sec = 3; }
+message TokenReq         { string token = 1; }
+message TokenResp        { Result result = 1; uint64 account_id = 2; }
+message GameRecordReq    { repeated uint64 player_ids = 1; repeated uint64 winner_ids = 2; int32 duration = 3; }
+message AddFriendReq     { uint64 account_id = 1; uint64 friend_id = 2; }
+message FriendListRpcResp   { Result result = 1; repeated FriendInfo friends = 2; }
+message SaveChatReq      { ChannelType channel = 1; uint64 sender_id = 2; string sender_name = 3; string message = 4; uint64 target_id = 5; }
+message GetChatHistoryReq   { ChannelType channel = 1; int32 count = 2; }
+message GetPrivateHistoryReq{ uint64 my_id = 1; uint64 target_id = 2; int32 count = 3; }
+message ChatHistoryRespRpc  { Result result = 1; repeated ChatEntry entries = 2; }
+message ChatEntry           { uint64 sender_id = 1; string sender_name = 2; string message = 3; uint64 timestamp = 4; }
+
+// ------------------------------------------------------------
+// LobbyService (lobby 服提供; gate 调用)
+// 房间/匹配/好友/聊天都走这里。lobby 不持客户端连接。
+// ------------------------------------------------------------
+service LobbyService {
+  rpc RoomList(RoomListRpcReq) returns (RoomListRpcResp);
+  rpc CreateRoom(CreateRoomRpcReq) returns (CreateRoomRpcResp);
+  rpc JoinRoom(JoinRoomRpcReq) returns (JoinRoomRpcResp);
+  rpc LeaveRoom(LeaveRoomRpcReq) returns (LeaveRoomRpcResp);
+  rpc Ready(ReadyRpcReq) returns (ResultResp);
+  rpc SwitchTeam(SwitchTeamRpcReq) returns (ResultResp);
+  rpc SwitchWeapon(SwitchWeaponRpcReq) returns (ResultResp);
+
+  rpc FriendAdd(FriendAddRpcReq) returns (FriendAddRpcResp);
+  rpc FriendList(IdReq) returns (FriendListRpcResp);
+
+  rpc Chat(ChatRpcReq) returns (ResultResp);
+  rpc PrivateChat(PrivateChatRpcReq) returns (ResultResp);
+  rpc ChatHistory(GetChatHistoryReq) returns (ChatHistoryRespRpc);
+}
+message RoomListRpcReq   {}
+message RoomListRpcResp  { Result result = 1; repeated RoomInfo rooms = 2; }
+message CreateRoomRpcReq { uint64 account_id = 1; string name = 2; string room_name = 3; string mode = 4; Gender gender = 5; string map_name = 6; }
+message CreateRoomRpcResp{ Result result = 1; uint32 room_id = 2; string msg = 3; }
+message JoinRoomRpcReq   { uint64 account_id = 1; string name = 2; uint32 room_id = 3; TeamSide team = 4; Gender gender = 5; }
+message JoinRoomRpcResp  { Result result = 1; uint32 room_id = 2; string msg = 3; }
+message LeaveRoomRpcReq  { uint64 account_id = 1; }
+message LeaveRoomRpcResp { Result result = 1; string msg = 2; }
+message ReadyRpcReq      { uint64 account_id = 1; bool ready = 2; }
+message SwitchTeamRpcReq { uint64 account_id = 1; TeamSide team = 2; }
+message SwitchWeaponRpcReq { uint64 account_id = 1; int32 weapon_id = 2; }
+message FriendAddRpcReq  { uint64 account_id = 1; string target_name = 2; }
+message FriendAddRpcResp { Result result = 1; string msg = 2; uint64 friend_id = 3; string friend_name = 4; }
+message ChatRpcReq       { uint64 account_id = 1; string name = 2; ChannelType channel = 3; string message = 4; }
+message PrivateChatRpcReq{ uint64 account_id = 1; string name = 2; uint64 target_account_id = 3; string message = 4; }
+
+// ------------------------------------------------------------
+// BattleService (battle 服提供; gate 调用)
+// gate 把战斗操作转发到 battle; battle 内房间 actor 处理后经 PushService 推回。
+// ------------------------------------------------------------
+service BattleService {
+  rpc EnterBattle(EnterBattleReq) returns (EnterBattleResp);   // lobby 开局时调用, 创建战斗房间
+  rpc Shoot(ShootRpcReq) returns (ResultResp);
+  rpc Move(MoveRpcReq) returns (ResultResp);
+  rpc Pass(PassRpcReq) returns (ResultResp);
+  rpc AimBegin(PassRpcReq) returns (ResultResp);   // 蓄力开始→重置回合计时
+  rpc LeaveBattle(LeaveBattleRpcReq) returns (ResultResp);
+}
+message EnterBattleReq {
+  repeated BattlePlayerInfo players = 1;
+}
+message BattlePlayerInfo {
+  uint64   account_id = 1;
+  string   name       = 2;
+  TeamSide team       = 3;
+  uint64   gateway_id = 4;
+  Gender   gender     = 5;
+  int32    weapon_id  = 6;
+}
+message EnterBattleResp {
+  Result result = 1;
+  uint32 room_id = 2;
+  string msg     = 3;
+}
+message LeaveBattleRpcReq { uint64 account_id = 1; }
+message ShootRpcReq { uint64 account_id = 1; int32 angle = 2; double force = 3; bool is_fly = 4; int32 weapon_id = 5; }
+message MoveRpcReq  { uint64 account_id = 1; float delta_x = 2; }
+message PassRpcReq  { uint64 account_id = 1; }
+
+// ------------------------------------------------------------
+// PushService (gate 服提供; battle / lobby 调用)
+// 服务间实时推送通道: 把消息推给指定 accountId 的客户端。
+// payload = gate.proto 里某消息的 protobuf 序列化字节; msg_id 同 gate.MsgId。
+// ------------------------------------------------------------
+service PushService {
+  rpc NotifyClient(NotifyReq) returns (ResultResp);
+  rpc NotifyClients(NotifyManyReq) returns (ResultResp);  // 批量推(指定一组)
+  rpc NotifyAllOnline(NotifyReq) returns (ResultResp);    // 推给所有在线玩家(account_id 忽略)
+}
+message NotifyReq    { uint64 account_id = 1; uint32 msg_id = 2; bytes payload = 3; }
+message NotifyManyReq{ repeated uint64 account_ids = 1; uint32 msg_id = 2; bytes payload = 3; }

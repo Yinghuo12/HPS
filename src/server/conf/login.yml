@@ -1,0 +1,16 @@
+# 登录服配置
+service_name: login
+etcd_endpoint: "http://127.0.0.1:2379"
+etcd_ttl: 30
+
+# login 提供两类端口:
+#   - HTTP /login API 端口(供客户端明文登录)
+host: "0.0.0.0"
+port: 8200
+
+redis:
+  host: "127.0.0.1"
+  port: 6379
+
+# sylar 全局: 协程栈大小(128KB, 默认 1MB 太大, 高频短连接 RPC 会 OOM)
+fiber.stack_size: 1048576

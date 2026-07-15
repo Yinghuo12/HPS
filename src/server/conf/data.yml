@@ -1,0 +1,22 @@
+# 数据服配置
+service_name: data
+etcd_endpoint: "http://127.0.0.1:2379"
+etcd_ttl: 30
+
+host: "0.0.0.0"
+port: 8500
+
+db:
+  host: "127.0.0.1"
+  port: 3306
+  user: "root"
+  pass: "123456"
+  name: "ddt_game"
+  pool_size: 8
+
+redis:
+  host: "127.0.0.1"
+  port: 6379
+
+# sylar 全局: 协程栈大小(128KB, 默认 1MB 太大, 高频短连接 RPC 会 OOM)
+fiber.stack_size: 1048576

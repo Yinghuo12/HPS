@@ -3,20 +3,14 @@ build/
 packaging/dist/
 
 # Compiled binaries and libraries
-bin/ddt_client
-bin/ddt_server
-bin/rpc_test_callee
-bin/rpc_test_caller
-bin/chat_room
-bin/echo_*
-bin/my_http_server
-bin/test*
-bin/*.txt
-bin/*.dat
-bin/logs/
-bin/html/
+# bin/ 仅保留运行时配置 (conf/) 与资源，忽略全部编译产物 / core dump / 数据文件
+bin/*
+!bin/conf/
+bin/conf/*.txt
+bin/core
 lib/*.a
 lib/*.so
+lib/libetcd_close_fix.so
 *.o
 
 # Bundled third-party header deps — too large, install via system packages

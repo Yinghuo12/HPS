@@ -17,9 +17,23 @@ RpcProvider::RpcProvider() {
 }
 
 RpcProvider::~RpcProvider() {
-    if(m_zkClient) {
-        m_zkClient->close();
+    // EtcdRegistrar 析构会撤销全部注册并停止 KeepAlive
+}
+
+void RpcProvider::setEtcd(const std::string& endpoint, int ttl) {
+    m_etcdEndpoint = endpoint;
+    m_leaseTtl = ttl;
+}
+
+void RpcProvider::setListen(uint16_t port) {
+    m_listenPort = port;
+    if(m_advertise == "127.0.0.1:9000") {
+        m_advertise = std::string("127.0.0.1:") + std::to_string(port);
     }
+}
+
+void RpcProvider::setAdvertise(const std::string& host_port) {
+    m_advertise = host_port;
 }
 
 void RpcProvider::notifyService(Service* service) {
@@ -40,43 +54,28 @@ void RpcProvider::notifyService(Service* service) {
 }
 
 void RpcProvider::run() {
-    IPAddress::ptr addr = IPAddress::Create("0.0.0.0", 9000);
+    IPAddress::ptr addr = IPAddress::Create("0.0.0.0", m_listenPort);
     if(!bind(addr)) {
-        SYLAR_LOG_FATAL(g_rpclogger) << "RPC bind failed on 0.0.0.0:9000";
+        SYLAR_LOG_FATAL(g_rpclogger) << "RPC bind failed on 0.0.0.0:" << m_listenPort;
         return;
     }
 
-    // Register services in ZooKeeper
-    m_zkClient = std::make_shared<ZKClient>();
-    m_zkClient->init("127.0.0.1:2181", 30000,
-        [](int type, int stat, const std::string& path, ZKClient::ptr client) {
-            if(stat == ZKClient::StateType::CONNECTED) {
-                SYLAR_LOG_INFO(g_rpclogger) << "zookeeper connected";
-            } else if(stat == ZKClient::StateType::EXPIRED_SESSION) {
-                client->reconnect();
-            }
-        });
-
+    // 注册服务到 etcd：键 "/{ServiceName}/{Method}"，值 "ip:port"，
+    // 绑定租约（由 etcd::KeepAlive 自动续租，等价 ZK 临时节点）。
+    m_registrar = std::make_shared<EtcdRegistrar>(m_etcdEndpoint);
     for(auto& service : m_serviceMap) {
-        std::string service_path = "/" + service.first;
-        {
-            std::string new_path;
-            new_path.resize(128);
-            if(m_zkClient->exists(service_path, false) != ZOK) {
-                m_zkClient->create(service_path, "", new_path);
-            }
-        }
         for(auto& method : service.second.methodMap) {
-            std::string method_path = service_path + "/" + method.first;
-            std::string method_data = "127.0.0.1:9000";
-            std::string new_path;
-            new_path.resize(128);
-            m_zkClient->create(method_path, method_data, new_path,
-                &ZOO_OPEN_ACL_UNSAFE, ZOO_EPHEMERAL);
+            std::string method_path = "/" + service.first + "/" + method.first;
+            EtcdRegisterInfo info;
+            info.key = method_path;
+            info.value = m_advertise;
+            info.ttl = m_leaseTtl;
+            m_registrar->registerService(info);
         }
     }
 
-    SYLAR_LOG_INFO(g_rpclogger) << "RpcProvider start service at 0.0.0.0:9000";
+    SYLAR_LOG_INFO(g_rpclogger) << "RpcProvider start service at 0.0.0.0:" << m_listenPort
+        << " advertise=" << m_advertise << " (etcd=" << m_etcdEndpoint << ")";
     start();
 }
 
@@ -151,6 +150,9 @@ void RpcProvider::handleClient(sylar::Socket::ptr client) {
             this, &RpcProvider::sendResponse, client, response);
         service->CallMethod(methodDesc, nullptr, request, response, done);
         delete request;
+        // 一连接一请求: 处理完即退出循环, 由 TcpServer 回收连接。
+        // (曾尝试 keep-alive 循环复用连接, 但高频推送下出现 stack smashing,
+        //  根因是连接复用时数据流错位风险; 回退为短连接最稳妥。)
         break;
     }
 }

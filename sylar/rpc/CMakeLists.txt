@@ -1,10 +1,17 @@
-# RPC 层：rpc 源【不并入 libsylar】，仅由 rpc_test_callee/rpc_test_caller 直接编译，
-# 避免与 rpc_test 重复链接造成符号冲突。
-# 直接 set(... PARENT_SCOPE)（不经函数），子目录作用域的 PARENT 即根作用域，可正确上抛。
-# 用绝对路径，与原 RPC_SRC 行为一致；force_redefine_file_macro_for_sources 据此算出相对 __FILE__。
+# RPC 层：编入 libsylar（含 rpc_controller/provider/channel/pool + etcd_client）。
+# etcd_client.cc 依赖 etcd-cpp-apiv3（C++17），单独按 C++17 编译，其余源与 sylar 一起 C++11。
+# 另外上抛 RPC_SRC 供 rpc_test_callee/rpc_test_caller 直接编译（历史用法，保留兼容）。
+sylar_add_sources(
+    rpc_controller.cc
+    rpc_provider.cc
+    rpc_channel.cc
+    rpc_channel_pool.cc
+    etcd_client.cc
+)
+
 set(RPC_SRC
     ${CMAKE_SOURCE_DIR}/sylar/rpc/rpc_controller.cc
     ${CMAKE_SOURCE_DIR}/sylar/rpc/rpc_provider.cc
     ${CMAKE_SOURCE_DIR}/sylar/rpc/rpc_channel.cc
-    ${CMAKE_SOURCE_DIR}/sylar/rpc/zk_client.cc
+    ${CMAKE_SOURCE_DIR}/sylar/rpc/etcd_client.cc
     PARENT_SCOPE)

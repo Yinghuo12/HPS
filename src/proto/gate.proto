@@ -1,0 +1,256 @@
+syntax = "proto3";
+package ddt;
+
+import "common.proto";
+
+// ============================================================
+// 客户端 ↔ 网关 协议 (Unity 对接)
+// ============================================================
+//
+// 【传输】纯 TCP 长连接。
+//
+// 【帧格式】每条消息的线上布局(均网络序/大端):
+//   [ 4 字节 length ][ 2 字节 msg_id ][ protobuf payload ]
+//   - length: uint32, = sizeof(msg_id) + sizeof(payload) = 2 + len(payload)
+//   - msg_id : uint16, 见下方 MsgId 枚举
+//   - payload: 对应 GameMessage.payload oneof 里某子消息的 protobuf 序列化字节
+//
+// 【登录流程】
+//   1. 先 HTTP POST http://<login_host>:<login_port>/login  body: {"name":"x","password":"y"}
+//      返回 {"ok":true,"token":"...","account_id":123} (失败 ok=false)
+//   2. 建立 TCP 长连接到网关
+//   3. 首包发 MsgId::LOGIN, payload=LoginReq{token}
+//   4. 网关 RPC 校验 token, 返回 LoginResp; 之后方可发其他消息
+//
+// 【心跳】客户端定期发 MsgId::HEARTBEAT, 服务端回 HEARTBEAT。
+//
+// 【推送】服务端主动发的消息(Notify/Result/Update)也走同一帧格式, msg_id 区分方向。
+// ============================================================
+
+// 消息 ID —— 客户端消息(请求) 与 服务端消息(响应/通知) 共用同一编号空间。
+// 这里仅作文档; C++ 侧用 src/common/msg_id.h 的 MSG_* 常量(避免与 protobuf 生成的
+// MsgId 枚举冲突), Unity 侧按下列编号自行定义常量。
+//
+//   登录:     LOGIN=1(S->C LOGIN_RESP=2)  REGISTER=3(REGISTER_RESP=4)
+//             LOGOUT=24(S->C LOGOUT_RESP)
+//   房间:     ROOM_LIST=10(11) CREATE_ROOM=12(13) JOIN_ROOM=14(15)
+//             LEAVE_ROOM=16(17) READY=18(READY_NOTIFY=19) SWITCH_TEAM=20(21)
+//             ROOM_UPDATE=22(S->C 广播)
+//             ROOM_LIST_NOTIFY=23(S->C 全量房间列表推送, 大厅实时刷新)
+//   顶号:     KICK_NOTIFY=25(S->C 同账号新登录时踢旧连接)
+//   战斗:     ROOM_READY_NOTIFY=30 TURN_START_NOTIFY=31 SHOOT=32(33)
+//             MOVE=34(35) PASS=36 GAME_OVER_NOTIFY=37 OPPONENT_LEFT_NOTIFY=38
+//   社交:     CHAT=40(CHAT_NOTIFY=41) CHAT_HISTORY=42(43) PRIVATE_CHAT=44
+//             FRIEND_ADD=45(46) FRIEND_LIST=47(48)
+//   通用:     ERROR=90 HEARTBEAT=91(HEARTBEAT_RESP=92)
+
+// ============================================================
+// 客户端消息定义
+// ============================================================
+
+message LoginReq {
+  string token = 1;    // token 登录(重连用, 有 token 时优先)
+  string name = 2;     // 账号密码直登(首次登录, 无需先 HTTP)
+  string password = 3; // 账号密码直登
+}
+message LoginResp {
+  Result result     = 1;
+  uint64 account_id = 2;
+  string name       = 3;
+  string msg        = 4;
+  Gender gender     = 5;   // 0=未选择(需弹角色选择界面) 1=男 2=女
+}
+message SetGenderReq {
+  Gender gender = 1;   // 1=男 2=女
+}
+message SetGenderResp {
+  Result result = 1;
+  string msg    = 2;
+}
+message RegisterReq {
+  string name     = 1;
+  string password = 2;
+}
+message RegisterResp {
+  Result result     = 1;
+  uint64 account_id = 2;
+  string msg        = 3;
+}
+
+message RoomListReq {}
+message RoomListResp {
+  Result result = 1;
+  repeated RoomInfo rooms = 2;
+}
+message CreateRoomReq {
+  string room_name = 1;
+  string mode      = 2;   // "custom"(自定义对战) / "match"(匹配,暂未开放) / "pve"(副本,暂未开放)
+  string map_name  = 3;   // "ghost" / "rainbow" / "random"(默认)
+}
+message CreateRoomResp {
+  Result result = 1;
+  uint32 room_id = 2;
+  string msg     = 3;
+}
+message JoinRoomReq {
+  uint32 room_id = 1;
+  TeamSide team  = 2;
+}
+message JoinRoomResp {
+  Result result = 1;
+  uint32 room_id = 2;
+  string msg     = 3;
+}
+message LeaveRoomReq {}
+message LeaveRoomResp {
+  Result result = 1;
+  string msg    = 2;
+}
+message ReadyReq {
+  bool ready = 1;
+}
+message ReadyNotify {
+  uint64 account_id = 1;
+  bool   ready      = 2;
+}
+message SwitchTeamReq {
+  TeamSide team = 1;
+}
+message SwitchTeamResp {
+  Result result = 1;
+  TeamSide team = 2;
+  string  msg   = 3;
+}
+message SwitchWeaponReq {
+  int32 weapon_id = 1;   // 1=ice_cream 2=projectile
+}
+message SwitchWeaponResp {
+  Result result   = 1;
+  int32  weapon_id = 2;
+  string msg       = 3;
+}
+message RoomUpdateNotify {
+  RoomInfo room_info = 1;
+}
+
+message RoomReadyNotify {
+  uint32               room_id        = 1;
+  repeated PlayerState players        = 2;   // 所有参战玩家(多人)
+  float                wind           = 4;
+  uint64               first_turn_id  = 5;
+  PhysicsParamsMsg     physics_params = 6;
+  float                max_move_per_turn = 7;
+  // (字段 8 原 height_map 已移除: 改用 2D 体素位图 terrain_bitmap)
+  string               map_name       = 9;   // 地图背景名("ghost"/"rainbow")
+  bytes                terrain_bitmap = 10;  // 2D 体素位图(行优先, bit[x + y*terrain_w], 1=实体地形)
+  int32                terrain_w      = 11;  // X 维度(=world_length, 3000)
+  int32                terrain_h      = 12;  // Y 维度(覆盖最高地表, ~420)
+}
+message TurnStartNotify {
+  uint64               turn_account_id = 1;
+  float                wind            = 2;
+  uint32               turn_number     = 3;
+  repeated PlayerState players         = 4;   // 所有参战玩家当前状态(多人)
+}
+message ShootReq {
+  int32  angle     = 1;
+  double force     = 2;
+  bool   is_fly    = 3;   // 纸飞机武器(传送而非伤害)
+  int32  weapon_id = 4;   // 1=ice_cream 2=projectile(仅贴图不同)
+}
+message ShootResultNotify {
+  uint64      shooter_id      = 1;
+  int32       angle           = 2;
+  double      force           = 3;
+  float       wind            = 4;
+  float       hit_x           = 5;
+  float       hit_y           = 6;
+  bool        hit_player      = 7;
+  uint64      hit_account_id  = 8;
+  int32       damage          = 9;
+  repeated PlayerState updated_players = 10;   // 所有受影响玩家的最新状态(多人)
+  enum DamageType { NORMAL=0; CRITICAL=1; BLOCK=2; }
+  DamageType  damage_type     = 12;
+  float       start_x         = 13;
+  float       start_y         = 14;
+  int32       direction       = 15;
+  bool        is_fly          = 16;
+  int32       weapon_id       = 17;   // 武器贴图(1=ice_cream 2=projectile)
+}
+message MoveReq {
+  float delta_x = 1;
+}
+message MoveNotify {
+  uint64 account_id = 1;
+  float  new_x      = 2;
+}
+message PassReq {}
+message GameOverNotify {
+  uint64   winner_account_id = 1;   // 混战模式的唯一胜者(组队模式可=0)
+  TeamSide winning_team      = 2;   // 组队模式的获胜队伍(混战=默认值)
+  string   reason            = 3;
+}
+message OpponentLeftNotify {
+  uint64 account_id = 1;
+}
+
+// 顶号通知: 同账号在别处登录, 旧连接被踢
+message KickNotify {
+  int32  code = 1;   // 409
+  string msg  = 2;   // "账号在别处登录"
+}
+
+// 登出请求/响应
+message LogoutReq {}
+message LogoutResp {
+  Result result = 1;
+  string msg    = 2;
+}
+
+message ChatReq {
+  ChannelType channel = 1;
+  string      message = 2;
+}
+message ChatNotify {
+  ChannelType channel     = 1;
+  uint64      sender_id   = 2;
+  string      sender_name = 3;
+  string      message     = 4;
+  uint64      timestamp   = 5;
+}
+message ChatHistoryReq {
+  ChannelType channel = 1;
+  int32       count   = 2;
+}
+message ChatHistoryResp {
+  ChannelType       channel  = 1;
+  repeated ChatNotify messages = 2;
+}
+message PrivateChatReq {
+  uint64 target_account_id = 1;
+  string message           = 2;
+}
+message FriendAddReq {
+  string target_name = 1;
+}
+message FriendAddResp {
+  Result result       = 1;
+  string msg          = 2;
+  uint64 friend_id    = 3;
+  string friend_name  = 4;
+}
+message FriendListReq {}
+message FriendListResp {
+  repeated FriendInfo friends = 1;
+}
+
+message ErrorNotify {
+  int32  code = 1;
+  string msg  = 2;
+}
+message HeartbeatReq {
+  uint64 client_time = 1;
+}
+message HeartbeatResp {
+  uint64 server_time = 1;
+}

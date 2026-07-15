@@ -1,59 +1,101 @@
 syntax = "proto3";
 package ddt;
 
-// ---- 频道类型 ----
-enum ChannelType {
-  CHANNEL_TEAM      = 0;
-  CHANNEL_ALL       = 1;
-  CHANNEL_ROOM      = 2;
-  CHANNEL_WORLD     = 3;
-  CHANNEL_SYSTEM    = 4;
-  CHANNEL_BROADCAST = 5;
-  CHANNEL_PRIVATE   = 6;
+// ============================================================
+// 共享类型: 网关/服务间通用。被 gate.proto 和 rpc.proto import。
+// ============================================================
+
+// 统一结果码
+enum Result {
+  SUCCESS     = 0;
+  FAIL        = 1;   // 通用失败
+  NOT_FOUND   = 2;   // 目标不存在(账号/房间/玩家)
+  AUTH_FAIL   = 3;   // 认证失败(token 无效/过期)
+  ALREADY     = 4;   // 已存在/已在房间
+  FULL        = 5;   // 房间已满
+  BAD_PARAM   = 6;   // 参数非法
 }
 
-// ---- 队伍 ----
+// 队伍
 enum TeamSide {
   TEAM_RED  = 0;
   TEAM_BLUE = 1;
 }
 
-// ---- 共享消息 ----
-
-message TrajectoryPoint {
-  float x = 1;
-  float y = 2;
-  float t = 3;
+// 性别/角色(0=未选择 1=男 2=女)
+enum Gender {
+  GENDER_NONE   = 0;
+  GENDER_MALE   = 1;
+  GENDER_FEMALE = 2;
 }
 
+// 聊天频道
+enum ChannelType {
+  CHANNEL_WORLD   = 0;
+  CHANNEL_ROOM    = 1;
+  CHANNEL_TEAM    = 2;
+  CHANNEL_PRIVATE = 3;
+  CHANNEL_SYSTEM  = 4;
+}
+
+// 玩家战斗内状态快照
 message PlayerState {
-  uint32 id        = 1;
-  string name      = 2;
-  float  x         = 3;
-  float  y         = 4;
-  int32  hp        = 5;
-  int32  max_hp    = 6;
-  int32  angle     = 7;
-  int32  direction = 8;
+  uint64   account_id = 1;   // 统一用 accountId(废弃旧版 ephemeral player id)
+  string   name       = 2;
+  float    x          = 3;
+  float    y          = 4;
+  int32    hp         = 5;
+  int32    max_hp     = 6;
+  int32    angle      = 7;   // 当前瞄准角度(度)
+  int32    direction  = 8;   // 1=右, -1=左
+  TeamSide team       = 9;   // 队伍(多人胜负判定用)
+  Gender   gender     = 10;  // 性别(决定战斗贴图)
 }
 
-message ErrorNotify {
-  int32  code = 1;
-  string msg  = 2;
-}
-
+// 房间内一个席位
 message PlayerSlot {
-  uint32   player_id   = 1;
-  string   player_name = 2;
-  TeamSide team        = 3;
-  bool     ready       = 4;
+  uint64   account_id = 1;
+  string   name       = 2;
+  TeamSide team       = 3;
+  bool     ready      = 4;
+  Gender   gender     = 5;   // 性别(决定房间格子内贴图)
+  int32    weapon_id  = 6;   // 武器(1=ice_cream 2=projectile)
 }
 
+// 房间信息(大厅列表 / 通知)
 message RoomInfo {
-  uint32             room_id       = 1;
-  string             room_name     = 2;
-  int32              player_count  = 3;
-  int32              max_players   = 4;
-  bool               game_started  = 5;
-  repeated PlayerSlot players      = 6;
+  uint32             room_id      = 1;
+  string             room_name    = 2;
+  int32              player_count = 3;
+  int32              max_players  = 4;
+  bool               game_started = 5;
+  repeated PlayerSlot players     = 6;
+  string             mode         = 7;   // "custom" / "match" / "pve"
+  string             map_name     = 8;   // "ghost" / "rainbow"
+}
+
+// 物理常量(前后端共享, 服务端权威)
+message PhysicsParamsMsg {
+  double air_factor     = 1;
+  double wind_factor    = 2;
+  double gravity_factor = 3;
+  double force_factor   = 4;
+}
+
+// 好友信息
+message FriendInfo {
+  uint64 account_id = 1;
+  string name       = 2;
+  bool   online     = 3;
+  int32  level      = 4;
+}
+
+// 账号信息
+message AccountInfo {
+  uint64 account_id = 1;
+  string name       = 2;
+  int32  level      = 3;
+  int32  wins       = 4;
+  int32  losses     = 5;
+  Gender gender     = 6;
 }

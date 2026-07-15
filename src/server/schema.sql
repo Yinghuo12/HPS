@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   name           VARCHAR(32)  NOT NULL UNIQUE,
   password_hash  VARCHAR(64)  NOT NULL,
   salt           VARCHAR(32)  NOT NULL,
+  gender         TINYINT DEFAULT 0,   -- 0=未选择 1=男 2=女
   created_at     DATETIME DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 

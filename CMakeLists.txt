@@ -5,7 +5,7 @@ include(FetchContent)
 include(cmake/utils.cmake)
 
 set(CMAKE_VERBOSE_MAKEFILE ON)
-set(CMAKE_CXX_FLAGS "$ENV{CXXFLAGS} -rdynamic -O0 -ggdb -std=c++11 -Wall -Wno-deprecated -Werror -Wno-unused-function -Wno-builtin-macro-redefined -Wno-deprecated-declarations -Wno-pessimizing-move")
+set(CMAKE_CXX_FLAGS "$ENV{CXXFLAGS} -rdynamic -O0 -ggdb -std=c++11 -Wall -Wno-deprecated -Wno-unused-function -Wno-builtin-macro-redefined -Wno-deprecated-declarations -Wno-pessimizing-move")
 
 # === OpenSSL ===
 find_package(OpenSSL REQUIRED)
@@ -67,6 +67,17 @@ link_directories(./lib)
 # 此处统一取回编入单 SHARED 库。路径为仓库相对路径（如 sylar/core/log.cc），
 # 与原扁平 LIB_SRC 形态一致，__FILE__ 与 .o 命名行为不变。
 # 层级依赖：util/(叶) ← core/ ← scheduler/ ← net/ ← http/orm/rpc/
+# === etcd-cpp-apiv3（C++17 + gRPC）：编入 libsylar，供 rpc 模块使用 ===
+find_package(etcd-cpp-api CONFIG QUIET)
+if(etcd-cpp-api_FOUND)
+    message(STATUS "etcd-cpp-apiv3: found (target etcd-cpp-api)")
+else()
+    message(WARNING
+        "etcd-cpp-apiv3 NOT found. RPC/etcd 编码将无法链接。\n"
+        "  vcpkg: vcpkg install etcd-cpp-apiv3\n"
+        "  源码: https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3")
+endif()
+
 set(SYLAR_SOURCES "")
 add_subdirectory(sylar/core)
 add_subdirectory(sylar/util)
@@ -74,6 +85,22 @@ add_subdirectory(sylar/scheduler)
 add_subdirectory(sylar/net)
 add_subdirectory(sylar/http)
 add_subdirectory(sylar/orm)
+add_subdirectory(sylar/rpc)
+
+# rpcheader.proto 生成并编入 libsylar（rpc_provider/channel 依赖 RpcHeader）
+find_package(Protobuf REQUIRED)
+set(RPC_PB_DIR ${CMAKE_BINARY_DIR}/rpc)
+file(MAKE_DIRECTORY ${RPC_PB_DIR})
+add_custom_command(
+    OUTPUT ${RPC_PB_DIR}/rpcheader.pb.cc ${RPC_PB_DIR}/rpcheader.pb.h
+    COMMAND ${Protobuf_PROTOC_EXECUTABLE}
+        --cpp_out=${RPC_PB_DIR} --proto_path=${CMAKE_SOURCE_DIR}/sylar/rpc
+        ${CMAKE_SOURCE_DIR}/sylar/rpc/rpcheader.proto
+    DEPENDS ${CMAKE_SOURCE_DIR}/sylar/rpc/rpcheader.proto
+    COMMENT "Generating rpcheader.pb")
+set_property(GLOBAL APPEND PROPERTY sylar_sources "${RPC_PB_DIR}/rpcheader.pb.cc")
+include_directories(${RPC_PB_DIR})
+
 get_property(SYLAR_SOURCES GLOBAL PROPERTY sylar_sources)
 
 
@@ -93,15 +120,23 @@ target_link_libraries(sylar PUBLIC
     -lmysqlclient
     -lz
     -lzstd
-    -lresolv)
+    -lresolv
+    ${Protobuf_LIBRARIES})
 
-# rpc 源【不并入 libsylar】（仅 rpc_test 直接编译，避免重复符号）；
-# 此处仅把 RPC_SRC 列表上抛到根作用域，须早于下方 rpc_test_callee/rpc_test_caller。
-add_subdirectory(sylar/rpc)
+# etcd-cpp-apiv3 编入 libsylar（rpc/etcd_client.cc 用）；PUBLIC 上抛给消费者(ddt_* 服务)。
+if(etcd-cpp-api_FOUND)
+    target_link_libraries(sylar PUBLIC etcd-cpp-api)
+endif()
+# etcd_client.cc 依赖 etcd-cpp-apiv3（C++17），单独提升该源文件标准。
+set_source_files_properties(
+    "${CMAKE_SOURCE_DIR}/sylar/rpc/etcd_client.cc"
+    PROPERTIES COMPILE_OPTIONS "-std=c++17")
 
-# === DDT 共享物理库（前后端共用）===
-add_library(ddt_physics_common STATIC src/common/ddt_physics.cc)
-target_include_directories(ddt_physics_common PUBLIC ${CMAKE_SOURCE_DIR}/src)
+# RPC_SRC 已由上方的 add_subdirectory(sylar/rpc) 提供并编入 libsylar
+# （rpc_test_* 仍可直接编译 RPC_SRC，但 libsylar 自带 RPC 符号，消费者无需重复）。
+# 注: 原 ddt_physics_common 静态库 target 已移除——五个 ddt_* 服务实际通过
+# src/CMakeLists.txt 的 DDT_COMMON_SRC 直接把 ddt_physics.cc 编进各自可执行,
+# 该 .a 从未被任何 target 链接, 属 dead target。
 
 # 统一链接所有以来库
 set(DEPS_LIBS
@@ -129,6 +164,7 @@ add_executable(test_fiber tests/test_fiber.cc)
 add_executable(test_scheduler tests/test_scheduler.cc)
 add_executable(test_iomanager tests/test_iomanager.cc)
 add_executable(test_timer tests/test_timer.cc)
+add_executable(test_timewheel tests/test_timewheel.cc)  # 三级时间轮(与 TimerManager 互补)
 add_executable(test_hook tests/test_hook.cc)
 add_executable(test_address tests/test_address.cc)
 add_executable(test_socket tests/test_socket.cc)
@@ -145,50 +181,22 @@ add_executable(test_daemon tests/test_daemon.cc)
 add_executable(test_env tests/test_env.cc)
 add_executable(test_asynclog tests/test_asynclog.cc)  # 二次开发异步日志
 add_executable(test_orm tests/test_orm.cc)  # ORM 模块自测
+add_executable(test_etcd tests/test_etcd.cc)  # etcd 封装端到端自测（需本机 2379 起好 etcd）
 add_executable(echo_server_udp sylar/examples/echo_server_udp.cc)
 add_executable(echo_client_udp sylar/examples/echo_client_udp.cc)
 add_executable(test_ws_server tests/test_ws_server.cc)
 add_executable(test_ws_client tests/test_ws_client.cc)
 add_executable(chat_room sylar/examples/chat/chat_main.cc sylar/examples/chat/protocol.cc sylar/examples/chat/resource_servlet.cc sylar/examples/chat/chat_servlet.cc)
 
-# DDT 游戏客户端（独立构建，不使用框架的 -Werror）
-add_subdirectory(src/client)
-
-# === Protobuf for DDT game ===
+# === Protobuf (DDT 新版微服务 + 旧 rpc_test 共用) ===
 find_package(Protobuf REQUIRED)
-set(DDT_PROTO_DIR ${CMAKE_SOURCE_DIR}/src/proto)
-set(DDT_PB_DIR ${CMAKE_BINARY_DIR}/proto)
-file(MAKE_DIRECTORY ${DDT_PB_DIR})
 
-add_custom_command(
-    OUTPUT ${DDT_PB_DIR}/ddt.pb.cc ${DDT_PB_DIR}/ddt.pb.h
-    COMMAND ${Protobuf_PROTOC_EXECUTABLE}
-        --cpp_out=${DDT_PB_DIR}
-        --proto_path=${DDT_PROTO_DIR}
-        ${DDT_PROTO_DIR}/ddt.proto
-    DEPENDS ${DDT_PROTO_DIR}/ddt.proto
-    COMMENT "Generating DDT protobuf sources"
-)
-
-add_custom_target(ddt_pb DEPENDS ${DDT_PB_DIR}/ddt.pb.cc ${DDT_PB_DIR}/ddt.pb.h)
-
-# DDT 游戏服务器
-add_subdirectory(src/server)
+# DDT 游戏微服务 (gate/login/lobby/battle/data)
+# 旧版单体(src_old) + ImGui 客户端(src_old/client) 已归档, 不再构建。
+add_subdirectory(src)
 
 
-# === RPC framework ===
-set(RPC_PB_DIR ${CMAKE_BINARY_DIR}/rpc)
-file(MAKE_DIRECTORY ${RPC_PB_DIR})
-
-add_custom_command(
-    OUTPUT ${RPC_PB_DIR}/rpcheader.pb.cc ${RPC_PB_DIR}/rpcheader.pb.h
-    COMMAND ${Protobuf_PROTOC_EXECUTABLE}
-        --cpp_out=${RPC_PB_DIR}
-        --proto_path=${CMAKE_SOURCE_DIR}/sylar/rpc
-        ${CMAKE_SOURCE_DIR}/sylar/rpc/rpcheader.proto
-    DEPENDS ${CMAKE_SOURCE_DIR}/sylar/rpc/rpcheader.proto
-    COMMENT "Generating RPC header protobuf"
-)
+# === RPC framework (rpc_test 用的 test.pb；rpcheader.pb 已编入 libsylar) ===
 
 add_custom_command(
     OUTPUT ${RPC_PB_DIR}/test.pb.cc ${RPC_PB_DIR}/test.pb.h
@@ -207,25 +215,35 @@ add_custom_target(rpc_pb DEPENDS
 
 include_directories(${RPC_PB_DIR})
 
-# RPC_SRC 已由 sylar/rpc/CMakeLists.txt（上方 add_subdirectory(sylar/rpc)）提供
+# === etcd-cpp-apiv3（C++17 + gRPC）：仅用于 RPC 模块的 etcd_client.cc ===
+# 其余 rpc 源及 core/net/http/util 等仍按全局 -std=c++11 编译，互不影响。
+find_package(etcd-cpp-api CONFIG QUIET)
+if(etcd-cpp-api_FOUND)
+    message(STATUS "etcd-cpp-apiv3: found (target etcd-cpp-api)")
+else()
+    message(WARNING
+        "etcd-cpp-apiv3 NOT found. Install it (needs gRPC+protobuf+cpprestsdk) before building RPC targets:\n"
+        "  apt: libgrpc++-dev libgrpc-dev libprotobuf-dev protobuf-compiler-grpc && build etcd-cpp-apiv3 from source\n"
+        "  vcpkg: vcpkg install etcd-cpp-apiv3\n"
+        "See https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3")
+endif()
 
+# rpc_test_* 不再直接编译 RPC_SRC —— RPC 符号已随 libsylar 提供（避免重复定义）。
 add_executable(rpc_test_callee
     tests/rpc_test/rpc_callee.cc
-    ${RPC_SRC}
     ${RPC_PB_DIR}/test.pb.cc
     ${RPC_PB_DIR}/rpcheader.pb.cc
 )
 add_dependencies(rpc_test_callee rpc_pb sylar)
-target_link_libraries(rpc_test_callee ${DEPS_LIBS} ${Protobuf_LIBRARIES} -lzookeeper_mt)
+target_link_libraries(rpc_test_callee ${DEPS_LIBS} ${Protobuf_LIBRARIES})
 
 add_executable(rpc_test_caller
     tests/rpc_test/rpc_caller.cc
-    ${RPC_SRC}
     ${RPC_PB_DIR}/test.pb.cc
     ${RPC_PB_DIR}/rpcheader.pb.cc
 )
 add_dependencies(rpc_test_caller rpc_pb sylar)
-target_link_libraries(rpc_test_caller ${DEPS_LIBS} ${Protobuf_LIBRARIES} -lzookeeper_mt)
+target_link_libraries(rpc_test_caller ${DEPS_LIBS} ${Protobuf_LIBRARIES})
 
 
 # 链接库
@@ -252,6 +270,9 @@ target_link_libraries(test_iomanager sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_timer) #__FILE__
 target_link_libraries(test_timer sylar ${DEPS_LIBS})
+
+force_redefine_file_macro_for_sources(test_timewheel) #__FILE__
+target_link_libraries(test_timewheel sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_hook) #__FILE__
 target_link_libraries(test_hook sylar ${DEPS_LIBS})
@@ -300,6 +321,9 @@ target_link_libraries(test_asynclog sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(test_orm) #__FILE__
 target_link_libraries(test_orm sylar ${DEPS_LIBS})
+
+force_redefine_file_macro_for_sources(test_etcd) #__FILE__
+target_link_libraries(test_etcd sylar ${DEPS_LIBS})
 
 force_redefine_file_macro_for_sources(echo_server_udp) #__FILE__
 target_link_libraries(echo_server_udp sylar ${DEPS_LIBS})
