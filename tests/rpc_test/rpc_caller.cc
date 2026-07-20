@@ -1,3 +1,5 @@
+// RPC 客户端示例: 经 RpcChannel 调 TestService.Login
+
 #include "sylar/rpc/rpc_channel.h"
 #include "sylar/rpc/rpc_controller.h"
 #include "sylar/scheduler/iomanager.h"
@@ -20,7 +22,7 @@ int main() {
 
         stub.Login(&controller, &request, &response, nullptr);
 
-        if(controller.Failed()) {
+        if (controller.Failed()) {
             SYLAR_LOG_ERROR(g_logger) << "RPC failed: " << controller.ErrorText();
         } else {
             SYLAR_LOG_INFO(g_logger) << "RPC response: success=" << response.success()

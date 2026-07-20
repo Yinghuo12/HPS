@@ -7,13 +7,18 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "msg_id.h"
+#include "redis_pool.h"
 #include "rpc.pb.h"
 #include "service_base.h"
 #include "sylar/core/thread.h"
 #include "sylar/net/tcp_server.h"
 #include "sylar/rpc/rpc_channel.h"
+#include "sylar/rpc/rpc_controller.h"
 #include "sylar/scheduler/iomanager.h"
 #include "sylar/scheduler/timewheel.h"   // TimeWheel(心跳定时器迁移)
 
@@ -41,13 +46,7 @@ struct ClientSession {
     bool sendBusy = false;                // 是否有发送协程正在消费队列(去重启动)
 };
 
-// ============================================================
-// GateServer: 客户端 TCP 入口。
-// - 接受连接, 帧解析([4B len][2B msgid][pb])
-// - 首包 LOGIN 校验 token(调 LoginService), 绑定 accountId
-// - 按 msg_id 分发: 登录/注册 -> login; 房间/聊天/好友 -> lobby; 战斗 -> battle
-// - 实现 PushService(供 battle/lobby 回调推送)
-// ============================================================
+// 客户端 TCP 入口。处理帧解析、token 校验、msg_id 分发, 并实现 PushService 供 battle/lobby 推送。
 class GateServer : public sylar::TcpServer, public PushService {
 public:
     typedef std::shared_ptr<GateServer> ptr;
@@ -58,6 +57,10 @@ public:
     ~GateServer();
 
     void startHeartbeatCheck();
+    // 设置 Redis 地址(用于订阅世界聊天)。
+    void setRedis(const std::string& host, int port) { m_redisHost = host; m_redisPort = port; }
+    // 启动 Redis 订阅线程(chat:world), 由 gate_main 在 bind 后调一次。
+    void startWorldChatSubscriber();
 
 protected:
     // TcpServer: 每连接一个光纤
@@ -81,6 +84,12 @@ private:
     // 保证同一 fd 至多一个协程在 do_io(WRITE), 消除并发 send 触发的 sylar ASSERT。
     static void drainAndSend(ClientSession::ptr s);
     void sendError(ClientSession::ptr s, int code, const std::string& msg);
+
+    // §6 构造带 traceId 的 RPC controller(22 个 onXxx handler 统一入口)。
+    // traceId 格式: g<gatewayId>-a<accountId>-m<msgId>-<seq>。
+    // 中间服务经 RpcHeader.trace_id 继续透传(login/lobby/battle/data)。
+    std::shared_ptr<sylar::rpc::RpcController> newCtrl(ClientSession::ptr s, uint16_t msgId);
+    std::atomic<uint64_t> m_rpcSeq{0};
 
     // ---- msg_id handlers ----
     void onLogin(ClientSession::ptr s, const std::string& body);
@@ -113,6 +122,17 @@ private:
     // 顶号: 给旧 session 发 KICK_NOTIFY 后关闭其连接(新登录时调)
     void kickExistingSession(uint64_t accountId);
 
+    // §15 注册式分发: 取代原 handleClient 的 21 个 switch-case。
+    // 已登录(需 accountId != 0)的 handler 注册到 m_handlers;
+    // 预登录(无需鉴权, 如 LOGIN/REGISTER/HEARTBEAT)的 handler 直接在 handleClient 用 static map 查。
+    // 新增 msg_id 仅加一行注册。
+    typedef std::function<void(ClientSession::ptr, const std::string&)> Handler;
+    void registerHandlers();
+    std::unordered_map<uint16_t, Handler> m_handlers;
+    std::unordered_set<uint16_t> m_preAuthMsgs = {
+        MSG_LOGIN, MSG_REGISTER, MSG_HEARTBEAT, MSG_LOGOUT, MSG_SET_GENDER
+    };
+
     // 转发到 lobby/battle/login 的便捷
     std::shared_ptr<sylar::rpc::RpcChannel> lobbyChannel();
     std::shared_ptr<sylar::rpc::RpcChannel> battleChannel();
@@ -135,6 +155,12 @@ private:
     std::shared_ptr<sylar::rpc::RpcChannel> m_battleChan;
     std::shared_ptr<sylar::rpc::RpcChannel> m_loginChan;
     std::shared_ptr<sylar::rpc::RpcChannel> m_dataChan;
+
+    // Redis 订阅(世界聊天广播)。独立线程, 长期阻塞 redisGetReply。
+    std::shared_ptr<Subscriber> m_subscriber;
+    std::shared_ptr<std::thread> m_subThread;
+    std::string m_redisHost;
+    int m_redisPort = 6379;
 };
 
 } // namespace ddt

@@ -1,3 +1,5 @@
+// RPC 服务端示例: 注册 TestService 并运行
+
 #include "sylar/rpc/rpc_provider.h"
 #include "sylar/scheduler/iomanager.h"
 #include "sylar/core/log.h"

@@ -65,6 +65,13 @@ service DataService {
   rpc SaveChat(SaveChatReq) returns (ResultResp);
   rpc GetChatHistory(GetChatHistoryReq) returns (ChatHistoryRespRpc);
   rpc GetPrivateHistory(GetPrivateHistoryReq) returns (ChatHistoryRespRpc);
+
+  // 在线状态(Redis Set + Pub/Sub)。gate 登录/断线时调, 其他服务查 GetFriendList 自动回填。
+  rpc SetOnline(IdReq) returns (ResultResp);       // 上线: SADD online:players
+  rpc SetOffline(IdReq) returns (ResultResp);      // 下线: SREM online:players
+
+  // 世界聊天广播: data 内 PUBLISH chat:world, gate 订阅后 NotifyAllOnline。
+  rpc PublishWorldChat(SaveChatReq) returns (ResultResp);
 }
 message CreateAccountReq { string name = 1; string password_hash = 2; string salt = 3; }
 message CreateAccountResp{ Result result = 1; uint64 account_id = 2; string msg = 3; }
@@ -80,7 +87,23 @@ message ResultResp       { Result result = 1; string msg = 2; }
 message SaveTokenReq     { string token = 1; uint64 account_id = 2; int32 ttl_sec = 3; }
 message TokenReq         { string token = 1; }
 message TokenResp        { Result result = 1; uint64 account_id = 2; }
-message GameRecordReq    { repeated uint64 player_ids = 1; repeated uint64 winner_ids = 2; int32 duration = 3; }
+// §13 多人战绩(向后兼容扩展)。
+//   旧字段 player_ids(1)/winner_ids(2)/duration(3) 保留, 兼容旧 caller。
+//   新字段 players(4)/winning_team(5) 优先使用, 支持任意人数 + 每位玩家明细。
+//   data 端 SaveGameRecord: players 非空走新路径(主子表), 否则回退旧路径(前 2 玩家)。
+message PlayerStat {
+  uint64   account_id   = 1;
+  TeamSide team         = 2;
+  bool     is_winner    = 3;
+  int32    damage_dealt = 4;   // 本局累计造成伤害(BattleRoom::onShoot AOE 内累加)
+}
+message GameRecordReq {
+  repeated uint64 player_ids = 1;     // 兼容旧版
+  repeated uint64 winner_ids = 2;     // 兼容旧版
+  int32 duration = 3;
+  repeated PlayerStat players = 4;    // §13 新增: 多人明细(优先)
+  TeamSide winning_team = 5;          // §13 新增: 胜方队伍(0=RED 1=BLUE)
+}
 message AddFriendReq     { uint64 account_id = 1; uint64 friend_id = 2; }
 message FriendListRpcResp   { Result result = 1; repeated FriendInfo friends = 2; }
 message SaveChatReq      { ChannelType channel = 1; uint64 sender_id = 2; string sender_name = 3; string message = 4; uint64 target_id = 5; }

@@ -28,6 +28,7 @@ int main(int argc, char** argv) {
         // 注: 下游 RPC channel 用短连接(无连接池)——连接池在 sylar hook 模型下
         //     存在 fd 复用竞态(addEvent assert), 已回退。
         auto gate = std::make_shared<ddt::GateServer>(cfg, cfg.etcd_endpoint, tw);
+        gate->setRedis(cfg.redis_host, cfg.redis_port);   // 用于订阅世界聊天
         auto addr = sylar::IPAddress::Create(cfg.host.c_str(), cfg.port);
         if(!gate->bind(addr)) {
             SYLAR_LOG_FATAL(g_logger) << "gate bind fail " << cfg.host << ":" << cfg.port;
@@ -35,6 +36,7 @@ int main(int argc, char** argv) {
         }
         gate->start();
         gate->startHeartbeatCheck();
+        gate->startWorldChatSubscriber();   // 订阅 Redis chat:world, 收到消息广播给本地在线玩家
         SYLAR_LOG_INFO(g_logger) << "gate TCP on " << cfg.host << ":" << cfg.port;
 
         // PushService RPC (供 lobby/battle 回调推送) — 用 +1 端口

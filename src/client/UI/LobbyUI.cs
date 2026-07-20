@@ -113,6 +113,7 @@ public class LobbyUI : MonoBehaviour {
         disp.Subscribe(MsgId.ROOM_READY_NOTIFY, bytes => {
             var m = RoomReadyNotify.Parser.ParseFrom(bytes);
             ClientLogger.Info($"开局! 进入战斗 (房间 {m.RoomId})");
+            Ddt.Net.Game.DebugLog.DBGLogT("Lobby", $"ROOM_READY_NOTIFY recv roomId={m.RoomId} players={m.Players.Count} → cache PendingRoomReady + StartTransition + LoadScene({battleScene})");
             // 缓存原始字节到 Session, BattleController 在新场景 Start 时重放
             Ddt.Net.Session.PendingRoomReady = bytes;
             // 重置首回合缓存标志: 等紧随其后的 TURN_START_NOTIFY 到达时缓存
@@ -127,6 +128,7 @@ public class LobbyUI : MonoBehaviour {
         // 多个 lambda 抢写 PendingTurnStart)。提到顶层订阅一次, 用标志位确保只缓存开局后第一次。
         disp.Subscribe(MsgId.TURN_START_NOTIFY, tsBytes => {
             if (!turnStartCached_) {
+                Ddt.Net.Game.DebugLog.DBGLogT("Lobby", "TURN_START_NOTIFY recv during transition → cache PendingTurnStart");
                 Ddt.Net.Session.PendingTurnStart = tsBytes;
                 turnStartCached_ = true;
             }

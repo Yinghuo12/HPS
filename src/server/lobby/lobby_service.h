@@ -19,6 +19,7 @@ struct LobbyRoom {
     std::string name;
     std::string mode = "custom";   // "custom" / "match" / "pve"
     bool started = false;
+
     struct Seat {
         uint64_t accountId = 0;
         std::string name;
@@ -28,6 +29,7 @@ struct LobbyRoom {
         Gender gender = GENDER_NONE;
         int weaponId = 1;   // 默认 ice_cream
     };
+
     static constexpr int kMaxSeats = 8;   // 8 席(红蓝各 4), 对应客户端 8 格房间 UI
     Seat seats[kMaxSeats];
     int seatCount = 0;
@@ -36,10 +38,7 @@ struct LobbyRoom {
     RoomInfo toRoomInfo() const;
 };
 
-// ============================================================
-// LobbyService: 房间/匹配/好友/聊天。
-// 房间状态用 RWMutex 保护(低争用)。不持客户端连接, 经 PushService 推送。
-// ============================================================
+// LobbyService: 房间/匹配/好友/聊天。房间状态用 RWMutex 保护, 经 PushService 推送。
 class LobbyServiceImpl : public LobbyService {
 public:
     typedef std::shared_ptr<LobbyServiceImpl> ptr;
@@ -48,10 +47,16 @@ public:
     ~LobbyServiceImpl();
 
     // 设置推送闭包: 由 lobby_main 注入(调用 gate 的 PushService)
-    void setPushFn(PushFn fn) { m_push = fn; }
+    void setPushFn(PushFn fn) {
+        m_push = fn;
+    }
+
     // 设置"广播给所有在线玩家"闭包(调用 gate 的 NotifyAllOnline)
     using PushAllFn = std::function<void(uint16_t msg_id, const std::string& payload)>;
-    void setPushAllFn(PushAllFn fn) { m_pushAll = fn; }
+
+    void setPushAllFn(PushAllFn fn) {
+        m_pushAll = fn;
+    }
 
     // ---- RPC 方法 ----
     void RoomList(::google::protobuf::RpcController*, const RoomListRpcReq*, RoomListRpcResp*, ::google::protobuf::Closure*) override;
@@ -93,6 +98,6 @@ private:
     PushAllFn m_pushAll;   // 广播给所有在线玩家(世界聊天用)
 };
 
-} // namespace ddt
+}  // namespace ddt
 
 #endif

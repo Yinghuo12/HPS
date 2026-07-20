@@ -22,7 +22,8 @@ int main(int argc, char** argv) {
     iom.schedule([&]() {
         auto impl = std::make_shared<ddt::DataServiceImpl>();
         if(!impl->init(cfg.db_host, cfg.db_port, cfg.db_user, cfg.db_pass,
-                       cfg.db_name, cfg.db_pool_size, cfg.redis_host, cfg.redis_port)) {
+                       cfg.db_name, cfg.db_pool_size, cfg.redis_host, cfg.redis_port,
+                       cfg.redis_pool_size)) {
             SYLAR_LOG_FATAL(g_logger) << "data: init backend fail";
             return;
         }

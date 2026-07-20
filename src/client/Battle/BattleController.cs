@@ -16,6 +16,7 @@ using UnityEngine.UI;
 using System.Collections.Generic;
 using Ddt;
 using Ddt.Net.Game;
+using static Ddt.Net.Game.DebugLog;   // DBGLog/DBGWarn/DBGErr 直接可用
 
 namespace Ddt.Net.Battle {
 public class BattleController : MonoBehaviour {
@@ -88,6 +89,7 @@ public class BattleController : MonoBehaviour {
     private ulong turnAccountId_ = 0;   // 当前回合玩家(摄像机跟随用)
 
     void Start() {
+        DBGLogT("Battle", $"BattleController.Start me={Session.MyAccountId} hasPendingRoomReady={Session.PendingRoomReady != null} hasPendingTurnStart={Session.PendingTurnStart != null}");
         var disp = NetworkManager.Instance.Dispatcher;
         disp.Subscribe(MsgId.ROOM_READY_NOTIFY, OnRoomReady);
         disp.Subscribe(MsgId.TURN_START_NOTIFY, OnTurnStart);
@@ -106,25 +108,30 @@ public class BattleController : MonoBehaviour {
         if (Session.PendingRoomReady != null) {
             var cached = Session.PendingRoomReady;
             Session.PendingRoomReady = null;
+            DBGLogT("Battle", "replaying cached PendingRoomReady");
             OnRoomReady(cached);
         }
         // 重放缓存的 TURN_START_NOTIFY(服务端 startGame 后立刻发的首回合)
         if (Session.PendingTurnStart != null) {
             var cached = Session.PendingTurnStart;
             Session.PendingTurnStart = null;
+            DBGLogT("Battle", "replaying cached PendingTurnStart (delayed 1 frame)");
             // 延迟一帧执行, 确保 OnRoomReady 的 Init 已完成
             StartCoroutine(DelayedTurnStart(cached));
         }
         NetworkManager.Instance.EndTransition();  // 修复：战斗场景初始化完毕，结束转场并派发加载期间缓存的所有网络消息
+        DBGLogT("Battle", "BattleController.Start DONE");
     }
-    
+
 
     private System.Collections.IEnumerator DelayedTurnStart(byte[] bytes) {
         yield return null;   // 等一帧
+        DBGLogT("Battle", "DelayedTurnStart firing OnTurnStart");
         OnTurnStart(bytes);
     }
 
     void OnDestroy() {
+        DBGLogT("Battle", "BattleController.OnDestroy");
         destroyed_ = true;   // 标记已销毁: 防止回大厅后僵尸回调访问已销毁的 field
         // 反注册订阅: MessageDispatcher 是 DontDestroyOnLoad 单例, 不退订会导致
         // 回大厅后本控制器已销毁但 dispatcher 仍持有僵尸回调(destroyed_ 守卫是兜底,
@@ -229,6 +236,9 @@ public class BattleController : MonoBehaviour {
         // resolvingShoot_ 覆盖 ShootResult 已到但弹丸刚启动(IsBusy 可能还没置 true)的窗口;
         // IsBusy 覆盖 TurnStart 在弹丸飞行中途到达的情况。
         // 无弹道动画时(Pass/超时/首回合)直接应用。
+        bool busy = (field != null && field.IsBusy);
+        string action = (busy || resolvingShoot_) ? "BUFFER" : "APPLY";
+        DBGLogT("Battle", "OnTurnStart recv: resolving=" + resolvingShoot_ + " field.IsBusy=" + busy + " -> " + action);
         if ((field != null && field.IsBusy) || resolvingShoot_) {
             pendingTurnStartBytes_ = bytes;
             return;
@@ -249,6 +259,7 @@ public class BattleController : MonoBehaviour {
         // 自身回合开始: 纸飞机冷却 -1(用于上一回合发射后的冷却递减)
         if (myTurn_ && flyCooldown_ > 0) flyCooldown_--;
         timeLeft_ = TURN_TIMEOUT;   // 重置倒计时
+        DBGLogT("Battle", $"ApplyTurnStart: turn={m.TurnNumber} turnAcc={m.TurnAccountId} myTurn={myTurn_} wind={m.Wind} timeLeft={timeLeft_}");
         // 告诉战场当前回合玩家(intro 收尾 + 回合跟随 + Manual 回退 都用它)
         if (field) field.SetTurnPlayer(m.TurnAccountId);
         // 关键: 用通知刷新玩家位置必须等战场不忙碌(炮弹飞行/爆炸/纸飞机动画播完)!
@@ -269,32 +280,40 @@ public class BattleController : MonoBehaviour {
     // TurnStartNotify(切回合 + 重置倒计时)。让玩家看清弹道结果后再切回合。
     // 无论 TurnStart 是否已缓冲都启动: 解除 resolvingShoot_; 若有缓冲则应用。
     private System.Collections.IEnumerator DelayedApplyTurnStart() {
+        DBGLogT("Battle", "DelayedApplyTurnStart START");
         // 等战场不忙碌(炮弹飞行 + 爆炸 + KeepBusyFor 0.8s), 最多 6s 防卡死
         float waited = 0f;
         while (field != null && field.IsBusy && waited < 6f) {
             waited += Time.deltaTime;
             yield return null;
         }
+        DBGLogT("Battle", $"DelayedApplyTurnStart field.IsBusy cleared (waited={waited:F1}s hasPending={pendingTurnStartBytes_ != null})");
         // 再额外等 TURN_SWITCH_DELAY(看清爆炸/命中结果)
         yield return new WaitForSeconds(TURN_SWITCH_DELAY);
         resolvingShoot_ = false;
+        DBGLogT("Battle", $"DelayedApplyTurnStart resolvingShoot_=false (TURN_SWITCH_DELAY={TURN_SWITCH_DELAY}s elapsed)");
         // 应用缓冲的回合切换(若有): TurnStart 在弹道期间到达被缓冲到这里
         if (pendingTurnStartBytes_ != null && !destroyed_) {
             byte[] saved = pendingTurnStartBytes_;
             pendingTurnStartBytes_ = null;
+            DBGLogT("Battle", "DelayedApplyTurnStart applying buffered TurnStart");
             ApplyTurnStart(saved);
+        } else {
+            DBGLogT("Battle", "DelayedApplyTurnStart no buffered TurnStart (will wait for new)");
         }
     }
 
     // 延迟到战场不忙碌(炮弹/爆炸/纸飞机动画播完)再刷新玩家位置,
     // 避免纸飞机射击者被 TurnStartNotify 提前设到落点(瞬移)。
     private System.Collections.IEnumerator DelayedTurnStartPlayerUpdate(byte[] bytes) {
+        DBGLogT("Battle", "DelayedTurnStartPlayerUpdate START");
         // 最多等 5 秒(防卡死), 期间战场忙碌就等
         float waited = 0f;
         while (field != null && field.IsBusy && waited < 5f) {
             waited += Time.deltaTime;
             yield return null;
         }
+        DBGLogT("Battle", $"DelayedTurnStartPlayerUpdate applying (waited={waited:F1}s)");
         var m = TurnStartNotify.Parser.ParseFrom(bytes);
         if (field) {
             foreach (var ps in m.Players) {
@@ -349,6 +368,7 @@ public class BattleController : MonoBehaviour {
         var m = ShootResultNotify.Parser.ParseFrom(bytes);
         Debug.Log($"[Battle] shootresult: dir={m.Direction} angle={m.Angle} start=({m.StartX},{m.StartY}) hit=({m.HitX},{m.HitY}) isFly={m.IsFly}");
         resolvingShoot_ = true;   // 标记弹道回放中: 缓冲紧随其后的 TurnStartNotify
+        DBGLogT("Battle", $"OnShootResult: resolvingShoot_=true shooter={m.ShooterId} hitPlayer={m.HitPlayer} dmg={m.Damage}");
         // 回放弹道(本地复算, 按武器/纸飞机选弹丸贴图)
         if (field && field.MyPlayer != null) {
             field.PlayTrajectory(m.StartX, m.StartY, m.Angle, m.Direction, m.Force, m.Wind,

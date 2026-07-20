@@ -22,5 +22,5 @@ heartbeat:
   timeout: 45
   check_interval: 10
 
-# sylar 全局: 协程栈大小(128KB, 默认 1MB 太大, 高频短连接 RPC 会 OOM)
+# 协程栈大小(1MB)
 fiber.stack_size: 1048576

@@ -60,6 +60,7 @@ public class NetworkManager : MonoBehaviour {
         if (Instance != null && Instance != this) { Destroy(gameObject); return; }
         Instance = this;
         DontDestroyOnLoad(gameObject);
+        Debug.Log("[Net] NetworkManager.Awake (singleton set, DontDestroyOnLoad)");
         // 允许后台运行: 窗口最小化/失焦时主循环继续跑, 心跳(跑在 Update 里)不停发,
         // 避免被服务端心跳超时(45s)踢掉 → 最小化后掉线无响应。
         Application.runInBackground = true;
@@ -131,9 +132,9 @@ public class NetworkManager : MonoBehaviour {
             // 这比 ForceReconnect 更温和: 短时最小化(连接还活着)不会断线重连,
             // 只有服务端已踢人(连接死了)才重连。
             wasPaused_ = false;
+            Debug.Log("[Net] resumed from background, checking connection");
             lock (queuedPackets_) { queuedPackets_.Clear(); }
             if (Client != null) {
-                Debug.Log("[Net] resumed from background, checking connection");
                 Client.CheckAndRecover();
             }
         }

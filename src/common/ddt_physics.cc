@@ -4,10 +4,10 @@
 
 namespace ddt {
 
-// 坐标系: Y 向上(原点在底部)。
-//   - 重力把炮弹向下拉(cy 随时间先升后降)。
-//   - 2D 碰撞: terrain.isSolid(ix, iy) 查弹道当前格是否实体。
-//   - gravity_factor 取正值(重力大小), 与 Unity 客户端一致。
+// 坐标系: Y 向上(原点在底部)
+//   - 重力把炮弹向下拉(cy 随时间先升后降)
+//   - 2D 碰撞: terrain.isSolid(ix, iy) 查弹道当前格是否实体
+//   - gravity_factor 取正值(重力大小), 与 Unity 客户端一致
 
 int PhysicsEngine::calculateDamage(float hit_x, float hit_y,
                                    float target_x, float target_y,
@@ -25,10 +25,6 @@ int PhysicsEngine::calculateDamage(float hit_x, float hit_y,
 float PhysicsEngine::generateWind() {
     return static_cast<float>((std::rand() % 201 - 100) / 10.0);
 }
-
-// ============================================================
-// Terrain2D 版本: 二维体素碰撞
-// ============================================================
 
 // 轻量版: 只算落点, 不存轨迹点(服务端用, 避免 fiber 栈上分配大 vector)
 ShootResult PhysicsEngine::computeHitPoint2D(
@@ -135,7 +131,7 @@ ShootResult PhysicsEngine::computeTrajectory2D(
 
 float PhysicsEngine::getSlopeAngle2D(float x, const Terrain2D& terrain) {
     int ix = static_cast<int>(x);
-    if(ix < 3 || ix >= terrain.width() - 3) return 0.0f;
+    if (ix < 3 || ix >= terrain.width() - 3) return 0.0f;
     // 用 columnHeight 做差分
     float dy = terrain.columnHeight(ix + 3) - terrain.columnHeight(ix - 3);
     return atan2f(dy, 6.0f) * 180.0f / 3.14159265f;

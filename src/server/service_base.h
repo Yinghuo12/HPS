@@ -9,10 +9,7 @@
 
 namespace ddt {
 
-// ============================================================
-// 单服务配置(从 yml 加载; 每个服务一份)
-// 字段统一收集, 服务按需读取自己关心的部分。
-// ============================================================
+// 单服务配置(从 yml 加载; 每个服务一份)。字段统一收集, 服务按需读取。
 struct ServiceConfig {
     typedef sylar::Singleton<ServiceConfig> Instance;
 
@@ -39,6 +36,7 @@ struct ServiceConfig {
 
     std::string redis_host = "127.0.0.1";
     int         redis_port = 6379;
+    int         redis_pool_size = 4;   // §10: Redis 连接池大小(data 服务用)
 
     // 网关专属
     int heartbeat_timeout        = 45;
@@ -81,17 +79,7 @@ private:
     static void parseHostPort(const std::string& s, std::string& h, int& p, int defPort);
 };
 
-// ============================================================
 // 服务启动器: 统一日志/配置/信号/IOManager 启停
-//
-// 各服务 main 用法:
-//   ServiceRunner runner("gate");
-//   if(!runner.init(argc, argv)) return 1;     // 加载 conf/{name}.yml + 日志
-//   sylar::IOManager iom(4, true, "gate");
-//   ... 在 iom.schedule 内启动本服务的 server / RpcProvider ...
-//   runner.installSignal();                    // SIGINT/SIGTERM 优雅退出
-//   return 0;                                   // iom 在 main 线程跑
-// ============================================================
 class ServiceRunner {
 public:
     ServiceRunner(const std::string& name);

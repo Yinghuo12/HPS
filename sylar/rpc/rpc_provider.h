@@ -12,17 +12,16 @@
 namespace sylar {
 namespace rpc {
 
+// RPC 服务提供者：注册 service、向 etcd 注册路由、监听端口并处理请求。
 class RpcProvider : public sylar::TcpServer {
 public:
     typedef std::shared_ptr<RpcProvider> ptr;
+
     RpcProvider();
     ~RpcProvider();
 
     void notifyService(google::protobuf::Service* service);
-    // 设置 etcd 地址（默认 http://127.0.0.1:2379）与租约 TTL（秒）。
     void setEtcd(const std::string& endpoint, int ttl = 30);
-    // 微服务: 设置监听端口 与 etcd 注册的对外可达地址("ip:port")。
-    // 不调用则默认 0.0.0.0:9000 / 127.0.0.1:9000。
     void setListen(uint16_t port);
     void setAdvertise(const std::string& host_port);
     void run();
@@ -41,6 +40,7 @@ private:
     };
 
     using ServiceMap = std::unordered_map<std::string, ServiceInfo>;
+
     ServiceMap m_serviceMap;
     EtcdRegistrar::ptr m_registrar;
     std::string m_etcdEndpoint = "http://127.0.0.1:2379";
@@ -49,7 +49,7 @@ private:
     std::string m_advertise = "127.0.0.1:9000";
 };
 
-}
-}
+}  // namespace rpc
+}  // namespace sylar
 
 #endif

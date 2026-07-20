@@ -59,6 +59,7 @@ public class NetClient {
 
     /// <summary>异步连接。完成后在主线程触发 OnConnected(经 mainThreadQueue)。</summary>
     public void Connect(string host, int port) {
+        Debug.Log($"[NetClient] Connect host={host} port={port}");
         host_ = host; port_ = port;
         userClosed_ = false;
         running_ = true;
@@ -68,12 +69,14 @@ public class NetClient {
     private void BeginConnect() {
         ThreadPool.QueueUserWorkItem(_ => {
             try {
+                Debug.Log($"[NetClient] connecting (background thread)...");
                 tcp_ = new TcpClient();
                 tcp_.Connect(host_, port_);
                 SetupSocket(tcp_);   // 连接建立后再设 socket 选项(KeepAlive 需要已连接)
                 stream_ = tcp_.GetStream();
                 Connected = true;
                 recvBuf_.Clear();
+                Debug.Log($"[NetClient] connected, starting recv/send threads");
                 StartSendThread();   // 启动发送线程(每次(重)连接都要)
                 EnqueueMain(() => OnConnected?.Invoke());
                 recvThread_ = new Thread(RecvLoop) { IsBackground = true };
@@ -162,6 +165,7 @@ public class NetClient {
 
     /// <summary>主动关闭(不触发重连)。</summary>
     public void Close() {
+        Debug.Log("[NetClient] Close (user-initiated, no reconnect)");
         userClosed_ = true;
         AutoReconnect = false;
         running_ = false;
@@ -230,6 +234,7 @@ public class NetClient {
         }
         Connected = false;
         bool wasUserClosed = userClosed_;
+        Debug.Log($"[NetClient] RecvLoop exit (wasUserClosed={wasUserClosed} AutoReconnect={AutoReconnect})");
         EnqueueMain(() => OnDisconnected?.Invoke());
         // 自动重连(非主动关闭 + 开关开 + 曾连过)
         if (!wasUserClosed && AutoReconnect && !string.IsNullOrEmpty(host_)) {
@@ -244,8 +249,10 @@ public class NetClient {
     private void StartReconnectLoop() {
         // CAS 保证同一时刻只有一个重连线程
         if(System.Threading.Interlocked.CompareExchange(ref isReconnecting_, 1, 0) != 0) {
+            Debug.Log("[NetClient] reconnect already in progress, skip");
             return;   // 已有重连线程在跑, 不重复启动
         }
+        Debug.Log($"[NetClient] StartReconnectLoop (delays=1/2/4/8/15s exponential)");
         EnqueueMain(() => OnReconnectStart?.Invoke());
         Thread rc = new Thread(() => {
             int attempt = 0;
@@ -253,10 +260,12 @@ public class NetClient {
             while (!userClosed_ && AutoReconnect && !Connected) {
                 attempt++;
                 int delay = delays[Math.Min(attempt - 1, delays.Length - 1)];
+                Debug.Log($"[NetClient] reconnect attempt #{attempt} in {delay}ms");
                 EnqueueMain(() => OnReconnectAttempt?.Invoke(attempt));
                 Thread.Sleep(delay);
                 if (userClosed_ || !AutoReconnect) break;
                 try {
+                    Debug.Log($"[NetClient] reconnect #{attempt}: connecting...");
                     tcp_ = new TcpClient();
                     tcp_.Connect(host_, port_);
                     SetupSocket(tcp_);   // 连接后再设选项
@@ -264,6 +273,7 @@ public class NetClient {
                     Connected = true;
                     recvBuf_.Clear();
                     running_ = true;
+                    Debug.Log($"[NetClient] reconnect #{attempt} SUCCESS");
                     StartSendThread();   // 重启发送线程(排空重连前的积压 + 后续发送)
                     // 重启接收线程
                     recvThread_ = new Thread(RecvLoop) { IsBackground = true };
@@ -272,10 +282,12 @@ public class NetClient {
                     EnqueueMain(() => OnReconnectSuccess?.Invoke());
                     isReconnecting_ = 0;   // 释放重连环
                     return;   // 成功, 退出重连循环
-                } catch {
+                } catch (Exception e) {
+                    Debug.LogWarning($"[NetClient] reconnect #{attempt} fail: {e.Message}");
                     // 继续退避重试
                 }
             }
+            Debug.Log("[NetClient] reconnect loop ended (cancelled or exhausted)");
             isReconnecting_ = 0;   // 释放重连环(重连取消/失败)
         }) { IsBackground = true };
         rc.Start();

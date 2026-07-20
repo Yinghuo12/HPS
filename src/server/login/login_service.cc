@@ -56,8 +56,14 @@ bool LoginServiceImpl::validateName(const std::string& name) {
 
 // ---- 注册核心 ----
 uint64_t LoginServiceImpl::doRegister(const std::string& name, const std::string& password, std::string& err) {
-    if(!validateName(name)) { err = "invalid name"; return 0; }
-    if(password.size() < 4) { err = "password too short"; return 0; }
+    if(!validateName(name)) {
+        err = "invalid name";
+        return 0;
+    }
+    if(password.size() < 4) {
+        err = "password too short";
+        return 0;
+    }
 
     std::string salt = randomString(32);
     std::string hash = hashPassword(password, salt);
@@ -88,11 +94,20 @@ uint64_t LoginServiceImpl::doLogin(const std::string& name, const std::string& p
     nreq.set_name(name);
     AccountRow arow;
     dataStub.GetAccountByName(&ctrl, &nreq, &arow, nullptr);
-    if(ctrl.Failed()) { err = ctrl.ErrorText(); return 0; }
-    if(arow.result() != SUCCESS) { err = "account not found"; return 0; }
+    if(ctrl.Failed()) {
+        err = ctrl.ErrorText();
+        return 0;
+    }
+    if(arow.result() != SUCCESS) {
+        err = "account not found";
+        return 0;
+    }
 
     std::string expect = hashPassword(password, arow.salt());
-    if(expect != arow.password_hash()) { err = "wrong password"; return 0; }
+    if(expect != arow.password_hash()) {
+        err = "wrong password";
+        return 0;
+    }
 
     // 签发 token
     token = randomString(48);

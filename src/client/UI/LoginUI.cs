@@ -10,6 +10,7 @@ using UnityEngine.UI;
 using UnityEngine.SceneManagement;
 using Ddt.Net;
 using Ddt.Net.Game;
+using static Ddt.Net.Game.DebugLog;
 
 namespace Ddt.Net.UI {
 public class LoginUI : MonoBehaviour {
@@ -261,19 +262,26 @@ public class LoginUI : MonoBehaviour {
         string name = nameInput_ != null ? nameInput_.text : "tester";
         string pwd = pwdInput_ != null ? pwdInput_.text : "1234";
         string token = null;
+        DBGLogT("Login", $"DoLogin START name={name} loginHost={loginHost}:{loginPort} gateHost={gateHost}:{gatePort}");
         statusText_.text = "登录中(HTTP)...";
         yield return LoginClient.Login(loginHost, loginPort, name, pwd, r => {
             if (r.ok) { token = r.token; Session.MyAccountId = (ulong)r.account_id; Session.Token = token; }
             else { statusText_.text = "HTTP 登录失败: " + r.msg; statusText_.color = Color.red; connecting_ = false; }
         });
-        if (string.IsNullOrEmpty(token)) yield break;
+        if (string.IsNullOrEmpty(token)) {
+            DBGWarn("[Login] DoLogin HTTP login failed (empty token)");
+            yield break;
+        }
+        DBGLogT("Login", $"DoLogin HTTP ok, accountId={Session.MyAccountId}, connecting gate...");
         statusText_.text = "连接网关...";
         NetworkManager.Instance.Client.Connect(gateHost, gatePort);
         float t = 3f;
         while (!NetworkManager.Instance.Client.Connected && t > 0) { t -= Time.deltaTime; yield return null; }
         if (!NetworkManager.Instance.Client.Connected) {
+            DBGWarn("[Login] DoLogin gate connect timeout (3s)");
             statusText_.text = "连接网关超时"; statusText_.color = Color.red; connecting_ = false; yield break;
         }
+        DBGLogT("Login", "DoLogin gate connected, sending LOGIN frame");
         GameFacade.SendLogin(token);
     }
 

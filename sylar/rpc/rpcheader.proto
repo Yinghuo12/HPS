@@ -2,8 +2,10 @@ syntax = "proto3";
 
 package sylar.rpc;
 
+// RPC 调用头部：随请求 args 一同发送，供对端分发方法与追踪调用链。
 message RpcHeader {
-    bytes service_name = 1;
-    bytes method_name = 2;
-    uint32 args_size = 3;
+    bytes  service_name = 1;  // 服务名
+    bytes  method_name  = 2;  // 方法名
+    uint32 args_size    = 3;  // 序列化后的 args 长度
+    string trace_id     = 4;  // 调用链追踪 ID（可选）
 }

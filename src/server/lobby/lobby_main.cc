@@ -13,21 +13,24 @@ static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
 
 int main(int argc, char** argv) {
     ddt::ServiceRunner runner("lobby");
-    if(!runner.init(argc, argv)) return 1;
+    if (!runner.init(argc, argv)) {
+        return 1;
+    }
     const auto& cfg = runner.config();
-    if(cfg.port == 0) const_cast<ddt::ServiceConfig&>(cfg).port = 8300;
+    if (cfg.port == 0) {
+        const_cast<ddt::ServiceConfig&>(cfg).port = 8300;
+    }
 
     sylar::IOManager iom(4, true, "lobby");
 
     iom.schedule([&]() {
         auto impl = std::make_shared<ddt::LobbyServiceImpl>(cfg.etcd_endpoint);
 
-        // RPC 连接池: lobby→gate 推送高频, 用池复用 TCP + etcd 发现缓存。
+        // RPC 连接池: lobby→gate 推送高频, 用池复用 TCP + etcd 发现缓存
         auto rpcPool = std::make_shared<sylar::rpc::RpcChannelPool>(cfg.etcd_endpoint, 8);
 
         // 注入推送闭包: lobby -> gate 的 PushService.NotifyClient
-        // 异步化: 投到 IOManager 独立协程执行, 不在 RPC 入口协程栈上同步执行
-        // (RPC 调用链 etcd+connect+send+recv+protobuf 深度大, 同步执行撑爆 1MB 栈)
+        // 异步投到独立协程执行, 避免撑爆 RPC 入口协程栈
         impl->setPushFn([&cfg, rpcPool](const ddt::RoutingHandle& h, uint16_t msg_id, const std::string& payload) {
             sylar::IOManager::GetThis()->schedule([&cfg, rpcPool, h, msg_id, payload]() {
                 try {
@@ -40,16 +43,17 @@ int main(int argc, char** argv) {
                     req.set_payload(payload);
                     ddt::ResultResp resp;
                     stub.NotifyClient(&ctrl, &req, &resp, nullptr);
-                    if(ctrl.Failed()) {
+                    if (ctrl.Failed()) {
                         SYLAR_LOG_WARN(g_logger) << "lobby push fail account=" << h.accountId
                             << " msg_id=" << msg_id << " err=" << ctrl.ErrorText();
                     }
-                } catch(const std::exception& e) {
+                } catch (const std::exception& e) {
                     SYLAR_LOG_WARN(g_logger) << "lobby push exception: " << e.what();
                 }
             });
         });
-        // 注入"广播给所有在线玩家"闭包: lobby -> gate 的 PushService.NotifyAllOnline(世界聊天用)
+
+        // 注入"广播给所有在线玩家"闭包: lobby -> gate.PushService.NotifyAllOnline(世界聊天用)
         impl->setPushAllFn([&cfg, rpcPool](uint16_t msg_id, const std::string& payload) {
             sylar::IOManager::GetThis()->schedule([&cfg, rpcPool, msg_id, payload]() {
                 try {
@@ -61,11 +65,11 @@ int main(int argc, char** argv) {
                     req.set_payload(payload);
                     ddt::ResultResp resp;
                     stub.NotifyAllOnline(&ctrl, &req, &resp, nullptr);
-                    if(ctrl.Failed()) {
+                    if (ctrl.Failed()) {
                         SYLAR_LOG_WARN(g_logger) << "lobby pushAll fail msg_id=" << msg_id
                             << " err=" << ctrl.ErrorText();
                     }
-                } catch(const std::exception& e) {
+                } catch (const std::exception& e) {
                     SYLAR_LOG_WARN(g_logger) << "lobby pushAll exception: " << e.what();
                 }
             });

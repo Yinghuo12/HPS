@@ -13,19 +13,9 @@
 namespace sylar {
 namespace rpc {
 
-/**
- * etcd v3 客户端封装（基于 etcd-cpp-apiv3）。
- *
- * 取代原 ZKClient，作为 RPC 服务注册/发现的底层。
- * 底层 etcd-cpp-apiv3（C++17 + gRPC）的细节全部隔离在 .cc 中（PImpl），
- * 本头文件保持 C++11 干净，不引入 etcd/gRPC/protobuf 头，core/net/http/util 等模块不受影响。
- *
- * 路由约定（与原 zk 方案一致）：注册键形如 "/{ServiceName}/{Method}"，
- * 值为 "ip:port"；多实例时键追加唯一后缀，按前缀枚举即可得到全部实例。
- */
+// ===== KV / Lease 原语层 =====
 
-// ===== KV / Lease 原语层 ==================================================
-
+// etcd v3 客户端封装（基于 etcd-cpp-apiv3），底层细节全部隔离在 .cc 内（PImpl）。
 class EtcdClient {
 public:
     typedef std::shared_ptr<EtcdClient> ptr;
@@ -34,13 +24,15 @@ public:
     struct KV {
         std::string key;
         std::string value;
-        int64_t lease = 0;       // 关联的租约 ID（0 表示无租约/持久键）
+        int64_t lease = 0;   // 关联的租约 ID（0 表示无租约/持久键）
     };
 
-    explicit EtcdClient(const std::string& endpoint = "http://127.0.0.1:2379", uint64_t timeout_ms = 3000);
+    explicit EtcdClient(
+        const std::string& endpoint = "http://127.0.0.1:2379",
+        uint64_t timeout_ms = 3000);
     ~EtcdClient();
 
-    // 单键写入。lease_id > 0 表示绑定租约（租约过期则键被自动删除，等价 ZK 临时节点）。
+    // 单键写入；lease_id > 0 表示绑定租约（等价 ZK 临时节点）。
     bool put(const std::string& key, const std::string& value, int64_t lease_id = 0);
     // 单键读取，未命中返回 false。
     bool get(const std::string& key, KV& out);
@@ -69,26 +61,24 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
+// ===== 服务注册层 =====
 
-// ===== 服务注册层 ==========================================================
-
-// 注册信息：键 / 值 / 租约 TTL（秒），对应文章中的 resinfo_t。
+// 注册信息：键 / 值 / 租约 TTL（秒）。
 struct EtcdRegisterInfo {
-    std::string key;        // 例如 /FriendService/GetFriendList
-    std::string value;      // 例如 127.0.0.1:9000
-    int ttl = 30;           // 租约时间
+    std::string key;      // 例如 /FriendService/GetFriendList
+    std::string value;    // 例如 127.0.0.1:9000
+    int ttl = 30;         // 租约时间
 };
 
-/**
- * 服务注册器：对照文章 RegisterEtcd。
- * 内部为每个服务申请租约并绑定键，由 etcd::KeepAlive 自动后台续租（RAII，
- * 续租由库内的 pplx 任务驱动，无需自建线程）；续租失败/KeepAlive 失效时自动重新注册（自愈）。
- */
+// 服务注册器：内部为每个服务申请租约并绑定键，
+// 由 etcd::KeepAlive 后台续租（RAII，无需自建线程）；续租失败时自动重新注册（自愈）。
 class EtcdRegistrar {
 public:
     typedef std::shared_ptr<EtcdRegistrar> ptr;
 
-    EtcdRegistrar(const std::string& endpoint = "http://127.0.0.1:2379", uint64_t timeout_ms = 3000);
+    EtcdRegistrar(
+        const std::string& endpoint = "http://127.0.0.1:2379",
+        uint64_t timeout_ms = 3000);
     ~EtcdRegistrar();
 
     // 注册一个服务。重复注册同名 key 返回 false。
@@ -112,33 +102,32 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-
-// ===== 服务发现监视层 ======================================================
+// ===== 服务发现监视层 =====
 
 // 监视事件类型
 enum EtcdWatchEvent {
-    ETCD_PUT = 0,       // 新增或值变化
-    ETCD_DELETE = 1,    // 键被删除
+    ETCD_PUT = 0,    // 新增或值变化
+    ETCD_DELETE = 1  // 键被删除
 };
+
 // 监视回调：事件类型 + key + value（删除时 value 为空）
 typedef std::function<void(EtcdWatchEvent, const std::string&, const std::string&)> EtcdWatchCallback;
 
-// 监视项：前缀 / 回调，对应文章 monitor_t。
-// 由 etcd::Watcher 在后台推送事件，无需轮询间隔。
+// 监视项：前缀 / 回调。由 etcd::Watcher 在后台推送事件，无需轮询。
 struct EtcdWatchInfo {
     std::string prefix;
     EtcdWatchCallback cb;
 };
 
-/**
- * 服务发现监视器：对照文章 MonitorEtcd。
- * 底层用 etcd::Watcher 对前缀做递归监听，etcd 服务端推送事件即触发回调，无需轮询。
- */
+// 服务发现监视器：底层用 etcd::Watcher 对前缀做递归监听，
+// etcd 服务端推送事件即触发回调，无需轮询。
 class EtcdWatcher {
 public:
     typedef std::shared_ptr<EtcdWatcher> ptr;
 
-    EtcdWatcher(const std::string& endpoint = "http://127.0.0.1:2379", uint64_t timeout_ms = 3000);
+    EtcdWatcher(
+        const std::string& endpoint = "http://127.0.0.1:2379",
+        uint64_t timeout_ms = 3000);
     ~EtcdWatcher();
 
     // 添加一个前缀监视。
@@ -158,7 +147,7 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-}   // namespace rpc
-}   // namespace sylar
+}  // namespace rpc
+}  // namespace sylar
 
 #endif

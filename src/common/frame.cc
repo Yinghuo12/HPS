@@ -32,7 +32,7 @@ std::string Frame::encode(uint16_t msg_id, const std::string& payload) {
     out.resize(4 + 2 + payload.size());
     writeBE32(&out[0], length);
     writeBE16(&out[4], msg_id);
-    if(!payload.empty()) {
+    if (!payload.empty()) {
         memcpy(&out[6], payload.data(), payload.size());
     }
     return out;
@@ -44,7 +44,7 @@ bool Frame::decode(const std::string& body, uint16_t& out_msg_id, std::string& o
 
 bool Frame::decode(const char* data, size_t len, uint16_t& out_msg_id, std::string& out_payload) {
     // body 至少含 2 字节 msg_id
-    if(len < 2) return false;
+    if (len < 2) return false;
     out_msg_id = readBE16(data);
     out_payload.assign(data + 2, len - 2);
     return true;

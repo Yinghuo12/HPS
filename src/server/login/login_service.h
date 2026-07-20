@@ -9,17 +9,8 @@
 
 namespace ddt {
 
-// ============================================================
-// LoginService: 注册/登录/改密 + token 签发与校验。
-//
-// 对外两类入口:
-//   1. HTTP /login /register (由 login 服的 HttpServer 处理, 密码只在此)
-//   2. RPC LoginService.ValidateToken/Register/Login (供 gate 调用)
-//
-// 密码: SHA256(password + salt)。salt 注册时随机生成。
-// token: 随机字符串, 存 Redis(session:<token> -> accountId)。
-// 持久化全部经 DataService RPC(不直连 DB)。
-// ============================================================
+// 注册/登录/改密 + token 签发与校验。
+// 持久化全部经 DataService RPC(不直连 DB)。密码 SHA256(password+salt), token 存 Redis。
 class LoginServiceImpl : public LoginService {
 public:
     typedef std::shared_ptr<LoginServiceImpl> ptr;

@@ -22,9 +22,44 @@ GateServer::GateServer(const ServiceConfig& cfg, const std::string& etcdEndpoint
     , m_etcdEndpoint(etcdEndpoint)
     , m_gatewayId(1)
     , m_tw(tw) {
+    registerHandlers();   // §15
 }
 
 GateServer::~GateServer() {
+}
+
+// §6 构造带 traceId 的 controller。22 个 onXxx handler 统一用此入口。
+std::shared_ptr<sylar::rpc::RpcController> GateServer::newCtrl(
+        ClientSession::ptr s, uint16_t msgId) {
+    auto ctrl = std::make_shared<sylar::rpc::RpcController>();
+    uint64_t seq = m_rpcSeq.fetch_add(1);
+    std::string tid = "g" + std::to_string(m_gatewayId)
+                    + "-a" + std::to_string(s ? s->accountId : 0)
+                    + "-m" + std::to_string(msgId)
+                    + "-" + std::to_string(seq);
+    ctrl->SetTraceId(tid);
+    return ctrl;
+}
+
+// §15 注册已登录 handler(预登录的 LOGIN/REGISTER/HEARTBEAT/LOGOUT/SET_GENDER
+//   在 handleClient 内用 static map 查, 不在此注册)。
+void GateServer::registerHandlers() {
+    m_handlers[MSG_ROOM_LIST]     = [this](ClientSession::ptr s, const std::string& b){ onRoomList(s, b); };
+    m_handlers[MSG_CREATE_ROOM]   = [this](ClientSession::ptr s, const std::string& b){ onCreateRoom(s, b); };
+    m_handlers[MSG_JOIN_ROOM]     = [this](ClientSession::ptr s, const std::string& b){ onJoinRoom(s, b); };
+    m_handlers[MSG_LEAVE_ROOM]    = [this](ClientSession::ptr s, const std::string& b){ onLeaveRoom(s, b); };
+    m_handlers[MSG_READY]         = [this](ClientSession::ptr s, const std::string& b){ onReady(s, b); };
+    m_handlers[MSG_SWITCH_TEAM]   = [this](ClientSession::ptr s, const std::string& b){ onSwitchTeam(s, b); };
+    m_handlers[MSG_SWITCH_WEAPON] = [this](ClientSession::ptr s, const std::string& b){ onSwitchWeapon(s, b); };
+    m_handlers[MSG_CHAT]          = [this](ClientSession::ptr s, const std::string& b){ onChat(s, b); };
+    m_handlers[MSG_CHAT_HISTORY]  = [this](ClientSession::ptr s, const std::string& b){ onChatHistory(s, b); };
+    m_handlers[MSG_PRIVATE_CHAT]  = [this](ClientSession::ptr s, const std::string& b){ onPrivateChat(s, b); };
+    m_handlers[MSG_FRIEND_ADD]    = [this](ClientSession::ptr s, const std::string& b){ onFriendAdd(s, b); };
+    m_handlers[MSG_FRIEND_LIST]   = [this](ClientSession::ptr s, const std::string& b){ onFriendList(s, b); };
+    m_handlers[MSG_SHOOT]         = [this](ClientSession::ptr s, const std::string& b){ onShoot(s, b); };
+    m_handlers[MSG_MOVE]          = [this](ClientSession::ptr s, const std::string& b){ onMove(s, b); };
+    m_handlers[MSG_PASS]          = [this](ClientSession::ptr s, const std::string& b){ onPass(s, b); };
+    m_handlers[MSG_AIM_BEGIN]     = [this](ClientSession::ptr s, const std::string& b){ onAimBegin(s, b); };
 }
 
 // ---- session 管理 ----
@@ -32,6 +67,7 @@ void GateServer::addSession(sylar::Socket::ptr sock, ClientSession::ptr s) {
     MutexType::WriteLock lk(m_sessionMutex);
     m_sockToSession[sock.get()] = s;
 }
+
 void GateServer::delSession(sylar::Socket::ptr sock) {
     ClientSession::ptr s;
     {
@@ -63,14 +99,14 @@ void GateServer::delSession(sylar::Socket::ptr sock) {
             try {
                 auto ch = self->lobbyChannel();
                 ddt::LobbyService::Stub stub(ch.get());
-                sylar::rpc::RpcController ctrl;
+                auto ctrl = self->newCtrl(sess, MSG_LEAVE_ROOM);
                 LeaveRoomRpcReq req;
                 req.set_account_id(accountId);
                 LeaveRoomRpcResp resp;
-                stub.LeaveRoom(&ctrl, &req, &resp, nullptr);
-                if(ctrl.Failed()) {
+                stub.LeaveRoom(ctrl.get(), &req, &resp, nullptr);
+                if(ctrl->Failed()) {
                     SYLAR_LOG_WARN(g_logger) << "gate: disconnect cleanup LeaveRoom fail account=" << accountId
-                        << " err=" << ctrl.ErrorText();
+                        << " err=" << ctrl->ErrorText();
                 }
             } catch(const std::exception& e) {
                 SYLAR_LOG_WARN(g_logger) << "gate: disconnect cleanup LeaveRoom exception: " << e.what();
@@ -79,22 +115,36 @@ void GateServer::delSession(sylar::Socket::ptr sock) {
             try {
                 auto bch = self->battleChannel();
                 ddt::BattleService::Stub bstub(bch.get());
-                sylar::rpc::RpcController bctrl;
+                auto bctrl = self->newCtrl(sess, MSG_LEAVE_ROOM);
                 LeaveBattleRpcReq breq;
                 breq.set_account_id(accountId);
                 ResultResp bresp;
-                bstub.LeaveBattle(&bctrl, &breq, &bresp, nullptr);
+                bstub.LeaveBattle(bctrl.get(), &breq, &bresp, nullptr);
             } catch(const std::exception& e) {
                 SYLAR_LOG_WARN(g_logger) << "gate: disconnect cleanup LeaveBattle exception: " << e.what();
+            }
+            // 上报下线到 Redis(经 data 服务 SREM online:players)
+            try {
+                auto dch = self->dataChannel();
+                ddt::DataService::Stub dstub(dch.get());
+                sylar::rpc::RpcController dctrl;
+                ddt::IdReq dreq;
+                dreq.set_account_id(accountId);
+                ddt::ResultResp dresp;
+                dstub.SetOffline(&dctrl, &dreq, &dresp, nullptr);
+            } catch(const std::exception& e) {
+                SYLAR_LOG_WARN(g_logger) << "gate: disconnect cleanup SetOffline exception: " << e.what();
             }
         });
     }
 }
+
 ClientSession::ptr GateServer::sessionByAccount(uint64_t accountId) {
     MutexType::ReadLock lk(m_sessionMutex);
     auto it = m_accountToSession.find(accountId);
     return it == m_accountToSession.end() ? nullptr : it->second;
 }
+
 void GateServer::kickExistingSession(uint64_t accountId) {
     ClientSession::ptr old;
     {
@@ -117,6 +167,7 @@ void GateServer::kickExistingSession(uint64_t accountId) {
         SYLAR_LOG_WARN(g_logger) << "gate: kick old session account=" << accountId;
     }
 }
+
 ClientSession::ptr GateServer::sessionBySock(sylar::Socket::ptr sock) {
     MutexType::ReadLock lk(m_sessionMutex);
     auto it = m_sockToSession.find(sock.get());
@@ -167,6 +218,7 @@ void GateServer::drainAndSend(ClientSession::ptr s) {
         if(rt <= 0) return;
     }
 }
+
 void GateServer::sendError(ClientSession::ptr s, int code, const std::string& msg) {
     ErrorNotify n;
     n.set_code(code);
@@ -184,25 +236,26 @@ std::shared_ptr<sylar::rpc::RpcChannel> GateServer::lobbyChannel() {
     if(!m_lobbyChan) m_lobbyChan = std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint);
     return m_lobbyChan;
 }
+
 std::shared_ptr<sylar::rpc::RpcChannel> GateServer::battleChannel() {
     std::lock_guard<std::mutex> lk(m_chanMutex);
     if(!m_battleChan) m_battleChan = std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint);
     return m_battleChan;
 }
+
 std::shared_ptr<sylar::rpc::RpcChannel> GateServer::loginChannel() {
     std::lock_guard<std::mutex> lk(m_chanMutex);
     if(!m_loginChan) m_loginChan = std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint);
     return m_loginChan;
 }
+
 std::shared_ptr<sylar::rpc::RpcChannel> GateServer::dataChannel() {
     std::lock_guard<std::mutex> lk(m_chanMutex);
     if(!m_dataChan) m_dataChan = std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint);
     return m_dataChan;
 }
 
-// ============================================================
-// 主连接处理: 帧读取 + 分发
-// ============================================================
+// ---- 主连接处理: 帧读取 + 分发 ----
 void GateServer::handleClient(sylar::Socket::ptr client) {
     SYLAR_LOG_INFO(g_logger) << "gate: client connected " << client;
     auto sess = std::make_shared<ClientSession>();
@@ -217,7 +270,10 @@ void GateServer::handleClient(sylar::Socket::ptr client) {
         if(ss.readFixSize(&lengthNet, 4) <= 0) break;
         uint32_t length = ((lengthNet & 0xFF) << 24) | ((lengthNet & 0xFF00) << 8)
                         | ((lengthNet & 0xFF0000) >> 8) | ((lengthNet & 0xFF000000) >> 24);
-        if(length < 2 || length > 16 * 1024 * 1024) { SYLAR_LOG_WARN(g_logger) << "gate: bad frame len " << length; break; }
+        if(length < 2 || length > 16 * 1024 * 1024) {
+            SYLAR_LOG_WARN(g_logger) << "gate: bad frame len " << length;
+            break;
+        }
         // 读 body(length 字节)
         std::string body(length, '\0');
         if(ss.readFixSize(&body[0], length) <= 0) break;
@@ -230,39 +286,34 @@ void GateServer::handleClient(sylar::Socket::ptr client) {
 
         // 分发
         try {
-            switch(msgId) {
-                case MSG_LOGIN:       onLogin(sess, payload); break;
-                case MSG_REGISTER:    onRegister(sess, payload); break;
-                case MSG_HEARTBEAT:   onHeartbeat(sess, payload); break;
-                case MSG_LOGOUT:      onLogout(sess, payload); break;
-                case MSG_SET_GENDER:  onSetGender(sess, payload); break;
-                default:
-                    if(sess->accountId == 0) {
-                        sendError(sess, 401, "not logged in");
-                        break;
+            // §15 注册式分发: 预登录白名单 + 已登录 handler 表。
+            if(m_preAuthMsgs.count(msgId)) {
+                // 预登录 handler(无需鉴权), static const 表避免每次构造
+                static const std::unordered_map<uint16_t, Handler> kPreAuth = {
+                    {MSG_LOGIN,      [this](ClientSession::ptr s, const std::string& b){ onLogin(s, b); }},
+                    {MSG_REGISTER,   [this](ClientSession::ptr s, const std::string& b){ onRegister(s, b); }},
+                    {MSG_HEARTBEAT,  [this](ClientSession::ptr s, const std::string& b){ onHeartbeat(s, b); }},
+                    {MSG_LOGOUT,     [this](ClientSession::ptr s, const std::string& b){ onLogout(s, b); }},
+                    {MSG_SET_GENDER, [this](ClientSession::ptr s, const std::string& b){ onSetGender(s, b); }},
+                };
+                auto it = kPreAuth.find(msgId);
+                if(it != kPreAuth.end()) {
+                    it->second(sess, payload);
+                } else {
+                    sendError(sess, 401, "not logged in");
+                }
+            } else {
+                // 其余要求 accountId != 0
+                if(sess->accountId == 0) {
+                    sendError(sess, 401, "not logged in");
+                } else {
+                    auto it = m_handlers.find(msgId);
+                    if(it != m_handlers.end()) {
+                        it->second(sess, payload);
+                    } else {
+                        SYLAR_LOG_WARN(g_logger) << "gate: unknown msg_id=" << msgId;
                     }
-                    switch(msgId) {
-                        case MSG_ROOM_LIST:    onRoomList(sess, payload); break;
-                        case MSG_CREATE_ROOM:  onCreateRoom(sess, payload); break;
-                        case MSG_JOIN_ROOM:    onJoinRoom(sess, payload); break;
-                        case MSG_LEAVE_ROOM:   onLeaveRoom(sess, payload); break;
-                        case MSG_READY:        onReady(sess, payload); break;
-                        case MSG_SWITCH_TEAM:  onSwitchTeam(sess, payload); break;
-                        case MSG_SWITCH_WEAPON: onSwitchWeapon(sess, payload); break;
-                        case MSG_CHAT:         onChat(sess, payload); break;
-                        case MSG_CHAT_HISTORY: onChatHistory(sess, payload); break;
-                        case MSG_PRIVATE_CHAT: onPrivateChat(sess, payload); break;
-                        case MSG_FRIEND_ADD:   onFriendAdd(sess, payload); break;
-                        case MSG_FRIEND_LIST:  onFriendList(sess, payload); break;
-                        case MSG_SHOOT:        onShoot(sess, payload); break;
-                        case MSG_MOVE:         onMove(sess, payload); break;
-                        case MSG_PASS:         onPass(sess, payload); break;
-                        case MSG_AIM_BEGIN:    onAimBegin(sess, payload); break;
-                        default:
-                            SYLAR_LOG_WARN(g_logger) << "gate: unknown msg_id=" << msgId;
-                            break;
-                    }
-                    break;
+                }
             }
         } catch(const std::exception& e) {
             SYLAR_LOG_ERROR(g_logger) << "gate: handle msg_id=" << msgId << " exception: " << e.what();
@@ -275,7 +326,10 @@ void GateServer::handleClient(sylar::Socket::ptr client) {
 // ---- 登录/注册 ----
 void GateServer::onLogin(ClientSession::ptr s, const std::string& body) {
     LoginReq req;
-    if(!req.ParseFromString(body)) { sendError(s, 400, "bad login req"); return; }
+    if(!req.ParseFromString(body)) {
+        sendError(s, 400, "bad login req");
+        return;
+    }
     auto ch = loginChannel();
     ddt::LoginService::Stub stub(ch.get());
 
@@ -284,16 +338,16 @@ void GateServer::onLogin(ClientSession::ptr s, const std::string& body) {
     // 2. 账号密码直登(req.token 为空, 首次登录): 先调 Login(name,pwd) 换 token, 再 ValidateToken
     std::string token = req.token();
     if(token.empty() && !req.name().empty()) {
-        sylar::rpc::RpcController ctrl0;
+        auto ctrl0 = newCtrl(s, MSG_LOGIN);
         LoginRpcReq lreq;
         lreq.set_name(req.name());
         lreq.set_password(req.password());
         LoginRpcResp lresp;
-        stub.Login(&ctrl0, &lreq, &lresp, nullptr);
-        if(ctrl0.Failed() || lresp.result() != SUCCESS) {
+        stub.Login(ctrl0.get(), &lreq, &lresp, nullptr);
+        if(ctrl0->Failed() || lresp.result() != SUCCESS) {
             LoginResp resp;
             resp.set_result(AUTH_FAIL);
-            resp.set_msg(ctrl0.Failed() ? ctrl0.ErrorText() :
+            resp.set_msg(ctrl0->Failed() ? ctrl0->ErrorText() :
                          (lresp.msg().empty() ? "login fail" : lresp.msg()));
             std::string payload;
             resp.SerializeToString(&payload);
@@ -303,15 +357,15 @@ void GateServer::onLogin(ClientSession::ptr s, const std::string& body) {
         token = lresp.token();
     }
 
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_LOGIN);
     ValidateTokenReq vreq;
     vreq.set_token(token);
     ValidateTokenResp vresp;
-    stub.ValidateToken(&ctrl, &vreq, &vresp, nullptr);
+    stub.ValidateToken(ctrl.get(), &vreq, &vresp, nullptr);
     LoginResp resp;
-    if(ctrl.Failed() || vresp.result() != SUCCESS) {
+    if(ctrl->Failed() || vresp.result() != SUCCESS) {
         resp.set_result(AUTH_FAIL);
-        resp.set_msg(ctrl.Failed() ? ctrl.ErrorText() : "invalid token");
+        resp.set_msg(ctrl->Failed() ? ctrl->ErrorText() : "invalid token");
     } else {
         s->accountId = vresp.account_id();
         s->name = vresp.name();
@@ -329,16 +383,34 @@ void GateServer::onLogin(ClientSession::ptr s, const std::string& body) {
         // 查 gender(决定客户端是否弹角色选择界面)
         auto dch = dataChannel();
         ddt::DataService::Stub dstub(dch.get());
-        sylar::rpc::RpcController dctrl;
+        auto dctrl = newCtrl(s, MSG_LOGIN);
         ddt::IdReq dreq;
         dreq.set_account_id(s->accountId);
         ddt::AccountRow arow;
-        dstub.GetAccountById(&dctrl, &dreq, &arow, nullptr);
-        if(!dctrl.Failed() && arow.result() == SUCCESS) {
+        dstub.GetAccountById(dctrl.get(), &dreq, &arow, nullptr);
+        if(!dctrl->Failed() && arow.result() == SUCCESS) {
             s->gender = arow.gender();
             resp.set_gender(arow.gender());
         }
-        SYLAR_LOG_INFO(g_logger) << "gate: login ok account=" << s->accountId << " name=" << s->name << " gender=" << (int)s->gender;
+        SYLAR_LOG_INFO(g_logger) << "[" << ctrl->TraceId() << "] gate: login ok account=" << s->accountId
+            << " name=" << s->name << " gender=" << (int)s->gender;
+        // 上报在线状态到 Redis(经 data 服务 SADD online:players)。
+        // 异步: 不阻塞 LOGIN_RESP 响应; 失败仅 warn 不影响登录。
+        auto self = std::static_pointer_cast<GateServer>(shared_from_this());
+        uint64_t accId = s->accountId;
+        sylar::IOManager::GetThis()->schedule([self, accId]() {
+            try {
+                auto ch = self->dataChannel();
+                ddt::DataService::Stub stub(ch.get());
+                sylar::rpc::RpcController ctrl;
+                ddt::IdReq req;
+                req.set_account_id(accId);
+                ddt::ResultResp resp;
+                stub.SetOnline(&ctrl, &req, &resp, nullptr);
+            } catch(const std::exception& e) {
+                SYLAR_LOG_WARN(g_logger) << "gate: SetOnline fail account=" << accId << " err=" << e.what();
+            }
+        });
     }
     std::string payload;
     resp.SerializeToString(&payload);
@@ -347,15 +419,18 @@ void GateServer::onLogin(ClientSession::ptr s, const std::string& body) {
 
 void GateServer::onRegister(ClientSession::ptr s, const std::string& body) {
     RegisterReq req;
-    if(!req.ParseFromString(body)) { sendError(s, 400, "bad register req"); return; }
+    if(!req.ParseFromString(body)) {
+        sendError(s, 400, "bad register req");
+        return;
+    }
     auto ch = loginChannel();
     ddt::LoginService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_REGISTER);
     RegisterRpcReq rreq;
     rreq.set_name(req.name());
     rreq.set_password(req.password());
     RegisterRpcResp rresp;
-    stub.Register(&ctrl, &rreq, &rresp, nullptr);
+    stub.Register(ctrl.get(), &rreq, &rresp, nullptr);
     RegisterResp resp;
     resp.set_result(rresp.result());
     resp.set_msg(rresp.msg());
@@ -372,21 +447,25 @@ void GateServer::onHeartbeat(ClientSession::ptr s, const std::string& body) {
     resp.SerializeToString(&payload);
     sendToSession(s, MSG_HEARTBEAT_RESP, payload);
 }
+
 void GateServer::onSetGender(ClientSession::ptr s, const std::string& body) {
     SetGenderReq req;
-    if(!req.ParseFromString(body)) { sendError(s, 400, "bad req"); return; }
+    if(!req.ParseFromString(body)) {
+        sendError(s, 400, "bad req");
+        return;
+    }
     auto dch = dataChannel();
     ddt::DataService::Stub dstub(dch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_SET_GENDER);
     ddt::UpdateGenderReq dreq;
     dreq.set_account_id(s->accountId);
     dreq.set_gender(req.gender());
     ddt::ResultResp dresp;
-    dstub.UpdateGender(&ctrl, &dreq, &dresp, nullptr);
+    dstub.UpdateGender(ctrl.get(), &dreq, &dresp, nullptr);
     SetGenderResp resp;
-    if(ctrl.Failed() || dresp.result() != SUCCESS) {
+    if(ctrl->Failed() || dresp.result() != SUCCESS) {
         resp.set_result(FAIL);
-        resp.set_msg(ctrl.Failed() ? ctrl.ErrorText() : dresp.msg());
+        resp.set_msg(ctrl->Failed() ? ctrl->ErrorText() : dresp.msg());
     } else {
         resp.set_result(SUCCESS);
         s->gender = req.gender();   // 更新 session 缓存
@@ -395,6 +474,7 @@ void GateServer::onSetGender(ClientSession::ptr s, const std::string& body) {
     resp.SerializeToString(&payload);
     sendToSession(s, MSG_SET_GENDER_RESP, payload);
 }
+
 void GateServer::onLogout(ClientSession::ptr s, const std::string& body) {
     // 退出登录: 删 Redis token + 通知 lobby 离开房间 + 通知 battle 离开战斗 + 清本地 session
     LogoutResp resp;
@@ -408,30 +488,30 @@ void GateServer::onLogout(ClientSession::ptr s, const std::string& body) {
         if(!s->token.empty()) {
             auto dch = std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint);
             ddt::DataService::Stub dstub(dch.get());
-            sylar::rpc::RpcController dctrl;
+            auto dctrl = newCtrl(s, MSG_LOGOUT);
             TokenReq dreq;
             dreq.set_token(s->token);
             ResultResp dresp;
-            dstub.DeleteToken(&dctrl, &dreq, &dresp, nullptr);
+            dstub.DeleteToken(dctrl.get(), &dreq, &dresp, nullptr);
         }
         // 通知 lobby 离开房间 + battle 离开战斗
         {
             auto ch = lobbyChannel();
             ddt::LobbyService::Stub stub(ch.get());
-            sylar::rpc::RpcController ctrl;
+            auto ctrl = newCtrl(s, MSG_LOGOUT);
             LeaveRoomRpcReq req;
             req.set_account_id(s->accountId);
             LeaveRoomRpcResp lresp;
-            stub.LeaveRoom(&ctrl, &req, &lresp, nullptr);
+            stub.LeaveRoom(ctrl.get(), &req, &lresp, nullptr);
         }
         {
             auto bch = battleChannel();
             ddt::BattleService::Stub bstub(bch.get());
-            sylar::rpc::RpcController bctrl;
+            auto bctrl = newCtrl(s, MSG_LOGOUT);
             LeaveBattleRpcReq breq;
             breq.set_account_id(s->accountId);
             ResultResp bresp;
-            bstub.LeaveBattle(&bctrl, &breq, &bresp, nullptr);
+            bstub.LeaveBattle(bctrl.get(), &breq, &bresp, nullptr);
         }
         // 清 accountToSession(同样用安全删除)
         {
@@ -451,10 +531,10 @@ void GateServer::onLogout(ClientSession::ptr s, const std::string& body) {
 void GateServer::onRoomList(ClientSession::ptr s, const std::string& body) {
     auto ch = lobbyChannel();
     ddt::LobbyService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_ROOM_LIST);
     RoomListRpcReq req;
     RoomListRpcResp resp;
-    stub.RoomList(&ctrl, &req, &resp, nullptr);
+    stub.RoomList(ctrl.get(), &req, &resp, nullptr);
     RoomListResp out;
     out.set_result(resp.result());
     for(const auto& r : resp.rooms()) *out.add_rooms() = r;
@@ -465,10 +545,13 @@ void GateServer::onRoomList(ClientSession::ptr s, const std::string& body) {
 
 void GateServer::onCreateRoom(ClientSession::ptr s, const std::string& body) {
     CreateRoomReq req;
-    if(!req.ParseFromString(body)) { sendError(s, 400, "bad req"); return; }
+    if(!req.ParseFromString(body)) {
+        sendError(s, 400, "bad req");
+        return;
+    }
     auto ch = lobbyChannel();
     ddt::LobbyService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_CREATE_ROOM);
     CreateRoomRpcReq rreq;
     rreq.set_account_id(s->accountId);
     rreq.set_name(s->name);
@@ -477,7 +560,7 @@ void GateServer::onCreateRoom(ClientSession::ptr s, const std::string& body) {
     rreq.set_map_name(req.map_name());
     rreq.set_gender(s->gender);
     CreateRoomRpcResp rresp;
-    stub.CreateRoom(&ctrl, &rreq, &rresp, nullptr);
+    stub.CreateRoom(ctrl.get(), &rreq, &rresp, nullptr);
     CreateRoomResp out;
     out.set_result(rresp.result());
     out.set_room_id(rresp.room_id());
@@ -489,10 +572,13 @@ void GateServer::onCreateRoom(ClientSession::ptr s, const std::string& body) {
 
 void GateServer::onJoinRoom(ClientSession::ptr s, const std::string& body) {
     JoinRoomReq req;
-    if(!req.ParseFromString(body)) { sendError(s, 400, "bad req"); return; }
+    if(!req.ParseFromString(body)) {
+        sendError(s, 400, "bad req");
+        return;
+    }
     auto ch = lobbyChannel();
     ddt::LobbyService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_JOIN_ROOM);
     JoinRoomRpcReq rreq;
     rreq.set_account_id(s->accountId);
     rreq.set_name(s->name);
@@ -500,7 +586,7 @@ void GateServer::onJoinRoom(ClientSession::ptr s, const std::string& body) {
     rreq.set_team(req.team());
     rreq.set_gender(s->gender);
     JoinRoomRpcResp rresp;
-    stub.JoinRoom(&ctrl, &rreq, &rresp, nullptr);
+    stub.JoinRoom(ctrl.get(), &rreq, &rresp, nullptr);
     JoinRoomResp out;
     out.set_result(rresp.result());
     out.set_room_id(rresp.room_id());
@@ -513,11 +599,11 @@ void GateServer::onJoinRoom(ClientSession::ptr s, const std::string& body) {
 void GateServer::onLeaveRoom(ClientSession::ptr s, const std::string&) {
     auto ch = lobbyChannel();
     ddt::LobbyService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_LEAVE_ROOM);
     LeaveRoomRpcReq rreq;
     rreq.set_account_id(s->accountId);
     LeaveRoomRpcResp rresp;
-    stub.LeaveRoom(&ctrl, &rreq, &rresp, nullptr);
+    stub.LeaveRoom(ctrl.get(), &rreq, &rresp, nullptr);
     LeaveRoomResp out;
     out.set_result(rresp.result());
     out.set_msg(rresp.msg());
@@ -528,29 +614,35 @@ void GateServer::onLeaveRoom(ClientSession::ptr s, const std::string&) {
 
 void GateServer::onReady(ClientSession::ptr s, const std::string& body) {
     ReadyReq req;
-    if(!req.ParseFromString(body)) { sendError(s, 400, "bad req"); return; }
+    if(!req.ParseFromString(body)) {
+        sendError(s, 400, "bad req");
+        return;
+    }
     auto ch = lobbyChannel();
     ddt::LobbyService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_READY);
     ReadyRpcReq rreq;
     rreq.set_account_id(s->accountId);
     rreq.set_ready(req.ready());
     ResultResp rresp;
-    stub.Ready(&ctrl, &rreq, &rresp, nullptr);
+    stub.Ready(ctrl.get(), &rreq, &rresp, nullptr);
     if(rresp.result() != SUCCESS) sendError(s, 500, rresp.msg());
 }
 
 void GateServer::onSwitchTeam(ClientSession::ptr s, const std::string& body) {
     SwitchTeamReq req;
-    if(!req.ParseFromString(body)) { sendError(s, 400, "bad req"); return; }
+    if(!req.ParseFromString(body)) {
+        sendError(s, 400, "bad req");
+        return;
+    }
     auto ch = lobbyChannel();
     ddt::LobbyService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_SWITCH_TEAM);
     SwitchTeamRpcReq rreq;
     rreq.set_account_id(s->accountId);
     rreq.set_team(req.team());
     ResultResp rresp;
-    stub.SwitchTeam(&ctrl, &rreq, &rresp, nullptr);
+    stub.SwitchTeam(ctrl.get(), &rreq, &rresp, nullptr);
     SwitchTeamResp out;
     out.set_result(rresp.result());
     out.set_team(req.team());
@@ -562,15 +654,18 @@ void GateServer::onSwitchTeam(ClientSession::ptr s, const std::string& body) {
 
 void GateServer::onSwitchWeapon(ClientSession::ptr s, const std::string& body) {
     SwitchWeaponReq req;
-    if(!req.ParseFromString(body)) { sendError(s, 400, "bad req"); return; }
+    if(!req.ParseFromString(body)) {
+        sendError(s, 400, "bad req");
+        return;
+    }
     auto ch = lobbyChannel();
     ddt::LobbyService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_SWITCH_WEAPON);
     SwitchWeaponRpcReq rreq;
     rreq.set_account_id(s->accountId);
     rreq.set_weapon_id(req.weapon_id());
     ResultResp rresp;
-    stub.SwitchWeapon(&ctrl, &rreq, &rresp, nullptr);
+    stub.SwitchWeapon(ctrl.get(), &rreq, &rresp, nullptr);
     SwitchWeaponResp out;
     out.set_result(rresp.result());
     out.set_weapon_id(req.weapon_id());
@@ -583,30 +678,37 @@ void GateServer::onSwitchWeapon(ClientSession::ptr s, const std::string& body) {
 // ---- 社交 ----
 void GateServer::onChat(ClientSession::ptr s, const std::string& body) {
     ChatReq req;
-    if(!req.ParseFromString(body)) { sendError(s, 400, "bad req"); return; }
+    if(!req.ParseFromString(body)) {
+        sendError(s, 400, "bad req");
+        return;
+    }
     auto ch = lobbyChannel();
     ddt::LobbyService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_CHAT);
     ChatRpcReq rreq;
     rreq.set_account_id(s->accountId);
     rreq.set_name(s->name);
     rreq.set_channel(req.channel());
     rreq.set_message(req.message());
     ResultResp rresp;
-    stub.Chat(&ctrl, &rreq, &rresp, nullptr);
+    stub.Chat(ctrl.get(), &rreq, &rresp, nullptr);
     if(rresp.result() != SUCCESS) sendError(s, 500, "chat fail");
 }
+
 void GateServer::onChatHistory(ClientSession::ptr s, const std::string& body) {
     ChatHistoryReq req;
-    if(!req.ParseFromString(body)) { sendError(s, 400, "bad req"); return; }
+    if(!req.ParseFromString(body)) {
+        sendError(s, 400, "bad req");
+        return;
+    }
     auto ch = lobbyChannel();
     ddt::LobbyService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_CHAT_HISTORY);
     GetChatHistoryReq rreq;
     rreq.set_channel(req.channel());
     rreq.set_count(req.count());
     ChatHistoryRespRpc rresp;
-    stub.ChatHistory(&ctrl, &rreq, &rresp, nullptr);
+    stub.ChatHistory(ctrl.get(), &rreq, &rresp, nullptr);
     ChatHistoryResp out;
     out.set_channel(req.channel());
     for(const auto& e : rresp.entries()) {
@@ -621,31 +723,39 @@ void GateServer::onChatHistory(ClientSession::ptr s, const std::string& body) {
     out.SerializeToString(&payload);
     sendToSession(s, MSG_CHAT_HISTORY_RESP, payload);
 }
+
 void GateServer::onPrivateChat(ClientSession::ptr s, const std::string& body) {
     PrivateChatReq req;
-    if(!req.ParseFromString(body)) { sendError(s, 400, "bad req"); return; }
+    if(!req.ParseFromString(body)) {
+        sendError(s, 400, "bad req");
+        return;
+    }
     auto ch = lobbyChannel();
     ddt::LobbyService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_PRIVATE_CHAT);
     PrivateChatRpcReq rreq;
     rreq.set_account_id(s->accountId);
     rreq.set_name(s->name);
     rreq.set_target_account_id(req.target_account_id());
     rreq.set_message(req.message());
     ResultResp rresp;
-    stub.PrivateChat(&ctrl, &rreq, &rresp, nullptr);
+    stub.PrivateChat(ctrl.get(), &rreq, &rresp, nullptr);
 }
+
 void GateServer::onFriendAdd(ClientSession::ptr s, const std::string& body) {
     FriendAddReq req;
-    if(!req.ParseFromString(body)) { sendError(s, 400, "bad req"); return; }
+    if(!req.ParseFromString(body)) {
+        sendError(s, 400, "bad req");
+        return;
+    }
     auto ch = lobbyChannel();
     ddt::LobbyService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_FRIEND_ADD);
     FriendAddRpcReq rreq;
     rreq.set_account_id(s->accountId);
     rreq.set_target_name(req.target_name());
     FriendAddRpcResp rresp;
-    stub.FriendAdd(&ctrl, &rreq, &rresp, nullptr);
+    stub.FriendAdd(ctrl.get(), &rreq, &rresp, nullptr);
     FriendAddResp out;
     out.set_result(rresp.result());
     out.set_msg(rresp.msg());
@@ -655,14 +765,15 @@ void GateServer::onFriendAdd(ClientSession::ptr s, const std::string& body) {
     out.SerializeToString(&payload);
     sendToSession(s, MSG_FRIEND_ADD_RESP, payload);
 }
+
 void GateServer::onFriendList(ClientSession::ptr s, const std::string&) {
     auto ch = lobbyChannel();
     ddt::LobbyService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_FRIEND_LIST);
     IdReq rreq;
     rreq.set_account_id(s->accountId);
     FriendListRpcResp rresp;
-    stub.FriendList(&ctrl, &rreq, &rresp, nullptr);
+    stub.FriendList(ctrl.get(), &rreq, &rresp, nullptr);
     FriendListResp out;
     for(const auto& f : rresp.friends()) *out.add_friends() = f;
     std::string payload;
@@ -673,10 +784,13 @@ void GateServer::onFriendList(ClientSession::ptr s, const std::string&) {
 // ---- 战斗(转发 battle) ----
 void GateServer::onShoot(ClientSession::ptr s, const std::string& body) {
     ShootReq req;
-    if(!req.ParseFromString(body)) { sendError(s, 400, "bad req"); return; }
+    if(!req.ParseFromString(body)) {
+        sendError(s, 400, "bad req");
+        return;
+    }
     auto ch = battleChannel();
     ddt::BattleService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_SHOOT);
     ShootRpcReq rreq;
     rreq.set_account_id(s->accountId);
     rreq.set_angle(req.angle());
@@ -684,43 +798,47 @@ void GateServer::onShoot(ClientSession::ptr s, const std::string& body) {
     rreq.set_is_fly(req.is_fly());
     rreq.set_weapon_id(req.weapon_id());
     ResultResp rresp;
-    stub.Shoot(&ctrl, &rreq, &rresp, nullptr);
+    stub.Shoot(ctrl.get(), &rreq, &rresp, nullptr);
 }
+
 void GateServer::onMove(ClientSession::ptr s, const std::string& body) {
     MoveReq req;
-    if(!req.ParseFromString(body)) { sendError(s, 400, "bad req"); return; }
+    if(!req.ParseFromString(body)) {
+        sendError(s, 400, "bad req");
+        return;
+    }
     auto ch = battleChannel();
     ddt::BattleService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_MOVE);
     MoveRpcReq rreq;
     rreq.set_account_id(s->accountId);
     rreq.set_delta_x(req.delta_x());
     ResultResp rresp;
-    stub.Move(&ctrl, &rreq, &rresp, nullptr);
+    stub.Move(ctrl.get(), &rreq, &rresp, nullptr);
 }
+
 void GateServer::onPass(ClientSession::ptr s, const std::string&) {
     auto ch = battleChannel();
     ddt::BattleService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_PASS);
     PassRpcReq rreq;
     rreq.set_account_id(s->accountId);
     ResultResp rresp;
-    stub.Pass(&ctrl, &rreq, &rresp, nullptr);
+    stub.Pass(ctrl.get(), &rreq, &rresp, nullptr);
 }
+
 void GateServer::onAimBegin(ClientSession::ptr s, const std::string&) {
     // 蓄力开始: 转发给 battle, 重置回合计时(给蓄力预留时间)。复用 PassRpcReq(只需 account_id)。
     auto ch = battleChannel();
     ddt::BattleService::Stub stub(ch.get());
-    sylar::rpc::RpcController ctrl;
+    auto ctrl = newCtrl(s, MSG_AIM_BEGIN);
     PassRpcReq rreq;
     rreq.set_account_id(s->accountId);
     ResultResp rresp;
-    stub.AimBegin(&ctrl, &rreq, &rresp, nullptr);
+    stub.AimBegin(ctrl.get(), &rreq, &rresp, nullptr);
 }
 
-// ============================================================
-// PushService: 供 lobby/battle 回调推送
-// ============================================================
+// ---- PushService: 供 lobby/battle 回调推送 ----
 void GateServer::NotifyClient(::google::protobuf::RpcController*,
         const NotifyReq* req, ResultResp* resp, ::google::protobuf::Closure* done) {
     auto s = sessionByAccount(req->account_id());
@@ -733,6 +851,7 @@ void GateServer::NotifyClient(::google::protobuf::RpcController*,
     }
     if(done) done->Run();
 }
+
 void GateServer::NotifyClients(::google::protobuf::RpcController*,
         const NotifyManyReq* req, ResultResp* resp, ::google::protobuf::Closure* done) {
     for(uint64_t aid : req->account_ids()) {
@@ -742,6 +861,7 @@ void GateServer::NotifyClients(::google::protobuf::RpcController*,
     resp->set_result(SUCCESS);
     if(done) done->Run();
 }
+
 void GateServer::NotifyAllOnline(::google::protobuf::RpcController*,
         const NotifyReq* req, ResultResp* resp, ::google::protobuf::Closure* done) {
     // 遍历所有在线 session 推送(用于大厅全量房间列表广播)
@@ -755,9 +875,7 @@ void GateServer::NotifyAllOnline(::google::protobuf::RpcController*,
     if(done) done->Run();
 }
 
-// ============================================================
-// 心跳检查
-// ============================================================
+// ---- 心跳检查 ----
 void GateServer::startHeartbeatCheck() {
     auto self = std::static_pointer_cast<GateServer>(shared_from_this());
     uint64_t interval = m_cfg.heartbeat_check_interval;
@@ -787,6 +905,53 @@ void GateServer::startHeartbeatCheck() {
             if(s->sock) s->sock->close();
         }
     }, true);   // 循环定时器
+}
+
+// ---- Redis 订阅: 世界聊天广播 ----
+// data 服务 PUBLISH chat:world <ChatNotify payload>, gate 订阅后调 NotifyAllOnline
+// 把消息推给本地所有在线玩家。替代原 lobby → gate.PushService.NotifyAllOnline 的 RPC 调用。
+// 多 gate 实例时天然分发: 每个 gate 各自订阅, 只推本地 session。
+void GateServer::startWorldChatSubscriber() {
+    if(m_redisHost.empty()) {
+        return;
+    }
+    m_subscriber = std::make_shared<Subscriber>(m_redisHost, m_redisPort);
+    // 关键: 必须捕获 IOManager 指针。订阅线程是裸 std::thread, 不是 IOManager worker,
+    // 它的 IOManager::GetThis() 返回 nullptr → sendToSession 内部调 schedule 会解引用 nullptr → SIGSEGV。
+    // 用捕获的 iom 指针让订阅线程能正确投递协程到 gate 的 IOManager。
+    auto iom = sylar::IOManager::GetThis();
+    auto self = std::static_pointer_cast<GateServer>(shared_from_this());
+    m_subThread = std::make_shared<std::thread>([self, iom]() {
+        while(true) {
+            if(!self->m_subscriber->subscribe("chat:world", [self, iom](const std::string& payload) {
+                // 收到消息: 投递到 gate 的 IOManager 上执行(而非本裸线程),
+                // 这样 sendToSession 内部的 IOManager::GetThis() 才有效。
+                iom->schedule([self, payload]() {
+                    // 解析 ChatNotify 并广播给本地所有在线 session
+                    ddt::ChatNotify n;
+                    if(!n.ParseFromString(payload)) {
+                        return;
+                    }
+                    sylar::RWMutex::ReadLock lk(self->m_sessionMutex);
+                    auto snapshot = self->m_accountToSession;
+                    lk.unlock();
+                    for(auto& kv : snapshot) {
+                        if(kv.second) {
+                            self->sendToSession(kv.second, MSG_CHAT_NOTIFY, payload);
+                        }
+                    }
+                });
+            })) {
+                sleep(2);
+                continue;
+            }
+            SYLAR_LOG_INFO(g_logger) << "gate: subscribed chat:world";
+            self->m_subscriber->loop();
+            SYLAR_LOG_WARN(g_logger) << "gate: chat:world subscription lost, reconnecting in 2s";
+            sleep(2);
+        }
+    });
+    m_subThread->detach();
 }
 
 } // namespace ddt

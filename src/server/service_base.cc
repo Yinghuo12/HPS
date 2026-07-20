@@ -20,7 +20,11 @@ static sylar::Logger::ptr g_logger = SYLAR_LOG_ROOT();
 
 void ServiceConfig::parseHostPort(const std::string& s, std::string& h, int& p, int defPort) {
     auto pos = s.find(':');
-    if(pos == std::string::npos) { h = s; p = defPort; return; }
+    if(pos == std::string::npos) {
+        h = s;
+        p = defPort;
+        return;
+    }
     h = s.substr(0, pos);
     p = std::atoi(s.substr(pos + 1).c_str());
 }
@@ -70,33 +74,47 @@ bool ServiceConfig::load(const std::string& path) {
     // redis
     readStr("host", "redis", redis_host);
     readInt("port", "redis", redis_port);
+    readInt("pool_size", "redis", redis_pool_size);
 
     // heartbeat
     readInt("timeout", "heartbeat", heartbeat_timeout);
     readInt("check_interval", "heartbeat", heartbeat_check_interval);
 
     // physics / game / combat
-    readDbl("air_factor",     "physics", air_factor);
-    readDbl("wind_factor",    "physics", wind_factor);
-    readDbl("gravity_factor", "physics", gravity_factor);
-    readDbl("force_factor",   "physics", force_factor);
-    readDbl("dt",             "physics", physics_dt);
-    readInt("world_width",    "game",    world_width);
-    readInt("world_length",   "game",    world_length);
-    readDbl("max_move_per_turn", "game", max_move_per_turn);
-    readInt("turn_timeout",   "game",    turn_timeout);
-    readInt("base_damage",    "combat",  base_damage);
-    readDbl("blast_radius",   "combat",  blast_radius);
-    readDbl("hit_radius",     "combat",  hit_radius);
-    readInt("min_angle",      "combat",  min_angle);
-    readInt("max_angle",      "combat",  max_angle);
-    readInt("min_force",      "combat",  min_force);
-    readInt("max_force",      "combat",  max_force);
-    readDbl("red_spawn_x",    "player",  red_spawn_x);
-    readDbl("blue_spawn_x",   "player",  blue_spawn_x);
-    readDbl("spawn_y",        "player",  spawn_y);
-    readInt("start_hp",       "player",  start_hp);
-    readInt("min_players",    "game",    min_players);
+    readDbl("air_factor",        "physics", air_factor);
+    readDbl("wind_factor",       "physics", wind_factor);
+    readDbl("gravity_factor",    "physics", gravity_factor);
+    readDbl("force_factor",      "physics", force_factor);
+    readDbl("dt",                "physics", physics_dt);
+    readInt("world_width",       "game",    world_width);
+    readInt("world_length",      "game",    world_length);
+    readDbl("max_move_per_turn", "game",    max_move_per_turn);
+    readInt("turn_timeout",      "game",    turn_timeout);
+    readInt("base_damage",       "combat",  base_damage);
+    readDbl("blast_radius",      "combat",  blast_radius);
+    readDbl("hit_radius",        "combat",  hit_radius);
+    readInt("min_angle",         "combat",  min_angle);
+    readInt("max_angle",         "combat",  max_angle);
+    readInt("min_force",         "combat",  min_force);
+    readInt("max_force",         "combat",  max_force);
+    readDbl("red_spawn_x",       "player",  red_spawn_x);
+    readDbl("blue_spawn_x",      "player",  blue_spawn_x);
+    readDbl("spawn_y",           "player",  spawn_y);
+    readInt("start_hp",          "player",  start_hp);
+    readInt("min_players",       "game",    min_players);
+
+    // §2: 环境变量覆盖(优先级 > yml)。生产用环境变量注入敏感字段(如 DDT_DB_PASS),
+    // 避免明文密码落 yml。仅在变量已设时覆盖, 未设则保留 yml/默认值。
+    // 注: 启动期主线程串行读取, libc getenv 线程安全(setenv 才非线程安全)。
+    if(const char* p = getenv("DDT_DB_HOST"))      db_host = p;
+    if(const char* p = getenv("DDT_DB_PORT"))      db_port = std::atoi(p);
+    if(const char* p = getenv("DDT_DB_USER"))      db_user = p;
+    if(const char* p = getenv("DDT_DB_PASS"))      db_pass = p;
+    if(const char* p = getenv("DDT_DB_NAME"))      db_name = p;
+    if(const char* p = getenv("DDT_DB_POOL_SIZE")) db_pool_size = std::atoi(p);
+    if(const char* p = getenv("DDT_REDIS_HOST"))      redis_host = p;
+    if(const char* p = getenv("DDT_REDIS_PORT"))      redis_port = std::atoi(p);
+    if(const char* p = getenv("DDT_REDIS_POOL_SIZE")) redis_pool_size = std::atoi(p);
 
     return true;
 }
@@ -136,7 +154,10 @@ bool ServiceRunner::init(int argc, char** argv) {
         };
         for(int i = 0; candidates[i]; ++i) {
             std::ifstream f(candidates[i]);
-            if(f.good()) { confPath = candidates[i]; break; }
+            if(f.good()) {
+                confPath = candidates[i];
+                break;
+            }
         }
     }
 

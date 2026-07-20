@@ -5,6 +5,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using static Ddt.Net.Game.DebugLog;   // DBGLog/DBGWarn/DBGErr 直接可用
 
 namespace Ddt.Net.Battle {
 public class BattleField : MonoBehaviour {
@@ -26,8 +27,10 @@ public class BattleField : MonoBehaviour {
     }
     private IEnumerator KeepBusyCoroutine(float seconds) {
         busyCount_++;
+        DBGLogT("Battle", $"KeepBusy +1 (dur={seconds}s) → busyCount={busyCount_}");
         yield return new WaitForSeconds(seconds);
         busyCount_ = Mathf.Max(0, busyCount_ - 1);
+        DBGLogT("Battle", $"KeepBusy -1 → busyCount={busyCount_}");
     }
 
     private readonly Dictionary<ulong, PlayerEntity> players_ = new Dictionary<ulong, PlayerEntity>();
@@ -106,6 +109,7 @@ public class BattleField : MonoBehaviour {
     public void Init(byte[] terrainBitmap, int terrainW, int terrainH, ulong myAccountId,
                      Google.Protobuf.Collections.RepeatedField<Ddt.PlayerState> allPlayers,
                      string mapName) {
+        DBGLogT("Battle", $"Init START: terrain={terrainW}x{terrainH} players={allPlayers.Count} me={myAccountId} map={mapName}");
         if (terrain) terrain.Build(terrainBitmap, terrainW, terrainH);
 
         // 地图背景
@@ -162,6 +166,7 @@ public class BattleField : MonoBehaviour {
 
     // 开局降落: 所有玩家从 Y+800 按重力下落到地表(纯视觉, 不影响逻辑位置)
     private IEnumerator PlayLanding(Google.Protobuf.Collections.RepeatedField<Ddt.PlayerState> allPlayers) {
+        DBGLogT("Battle", $"PlayLanding START players={allPlayers.Count}");
         // 记录每个玩家的目标(地表)位置, 起始位置设为空中
         var landingData = new List<System.Tuple<PlayerEntity, Vector3, Vector3>>();
         foreach (var ps in allPlayers) {
@@ -200,32 +205,55 @@ public class BattleField : MonoBehaviour {
         // 确保最终位置精确
         foreach (var d in landingData) d.Item1.transform.position = d.Item3;
         landingDone_ = true;
+        DBGLogT("Battle", "PlayLanding DONE landingDone_=true");
         // 降落完成后, 启动开场巡游: 逐个展示玩家 → 停在本回合玩家(复刻旧 CAM_INTRO)
         StartCoroutine(PlayIntro(landingData));
     }
 
     // 开场巡游: 依次平移到每个玩家并停留, 最后切到本回合玩家(复刻旧 CAM_INTRO 多阶段)
     private IEnumerator PlayIntro(List<System.Tuple<PlayerEntity, Vector3, Vector3>> landingData) {
+        DBGLogT("Battle", $"PlayIntro START n={landingData.Count} turnAcc={turnAccountId_} introDone_={introDone_}");
         introDone_ = false;
         yield return new WaitForSeconds(0.3f);
 
         // 逐个玩家: 平移过去 + 停留 1.5s
+        // 超时兜底(INTRO_PAN_TIMEOUT): App Nap / 窗口最小化时 Update() 不再调用,
+        // camTarget_ 永远到不了, WaitUntil 会无限挂起 → introDone_ 永远 false →
+        // 倒计时永远显示"准备中"。改用带超时的等待: 超时强制视为到位, 推进到下一玩家。
+        int idx = 0;
         foreach (var d in landingData) {
+            DBGLogT("Battle", $"PlayIntro pan#{idx} → acc={d.Item1.accountId} pos=({d.Item3.x:F0},{d.Item3.y:F0})");
             PanToCamera(d.Item3, camIntroSpeed_);
-            // 等平移完成: 用"相机到达可达目标(clamp后)"判定, 防止目标在边界外时永远等不到
-            yield return new WaitUntil(() => IsCamReachedTarget());
+            yield return WaitUntilCamReachedOrTimeout();
             yield return new WaitForSeconds(1.5f);   // 停留展示
+            idx++;
         }
 
         // 收尾: 平移到本回合玩家
         PlayerEntity turn = turnAccountId_ != 0 ? GetPlayer(turnAccountId_) : null;
         Vector3 finalPos = turn != null ? turn.transform.position
                           : (landingData.Count > 0 ? landingData[0].Item3 : new Vector3(WORLD_W / 2f, WORLD_H / 2f, 0));
+        DBGLogT("Battle", $"PlayIntro final pan → turn={turnAccountId_} pos=({finalPos.x:F0},{finalPos.y:F0})");
         PanToCamera(finalPos, 800f);
-        yield return new WaitUntil(() => IsCamReachedTarget());
+        yield return WaitUntilCamReachedOrTimeout();
 
         introDone_ = true;
+        DBGLogT("Battle", "PlayIntro DONE introDone_=true, handoff to BattleController");
         // 进入回合跟随(由 BattleController.Update 每帧 FocusCamera 接管)
+    }
+
+    // 单个玩家位置的相机到位等待: WaitUntil + 超时兜底。
+    // 正常情况下相机在几帧内到位; 极端情况(玩家在边界外的边界奇点)超时强制推进。
+    private IEnumerator WaitUntilCamReachedOrTimeout() {
+        float waited = 0f;
+        const float TIMEOUT = 3f;   // 单次平移最长等 3 秒(正常 < 0.5s)
+        while (waited < TIMEOUT) {
+            if (IsCamReachedTarget()) yield break;
+            waited += Time.deltaTime;
+            yield return null;
+        }
+        // 超时: 强制视为到位(Update 下一帧自然会停在边界, 不影响后续)
+        Debug.LogWarning($"[Battle] intro pan timeout after {TIMEOUT}s, forcing advance");
     }
 
     // 相机是否已到达"可达目标": 把原始目标 clamp 到相机边界后, 与当前位置比对。
@@ -299,6 +327,7 @@ public class BattleField : MonoBehaviour {
         }
         projectile_.SetSprite(projSprite, direction);
         projectile_.StartPlay(res.points, onComplete);
+        DBGLogT("Battle", $"Projectile START pts={res.points.Count} isFly={isFly}");
         Debug.Log($"[Battle] PlayTrajectory: isFly={isFly} pts={res.points.Count} dur={res.points[res.points.Count-1].t:F2}s hit=({res.hitX:F0},{res.hitY:F0})");
         // 摄像机跟随弹丸(实时贴合, 复刻旧 CAM_FOLLOW_PROJ)
         StartCoroutine(FollowProjectile());
@@ -306,10 +335,12 @@ public class BattleField : MonoBehaviour {
 
     // 摄像机跟随弹丸(每帧把目标刷新为弹丸当前坐标, CamMode=FollowProj 直接贴合)
     private IEnumerator FollowProjectile() {
+        DBGLogT("Battle", "FollowProjectile START");
         while (projectile_ != null && projectile_.gameObject.activeSelf && projectile_.IsActive) {
             FollowProjectileCamera(projectile_.transform.position);
             yield return null;
         }
+        DBGLogT("Battle", "FollowProjectile DONE");
     }
 
     /// <summary>在命中点爆炸(挖坑 + 4帧动画)。</summary>
@@ -376,8 +407,10 @@ public class BattleField : MonoBehaviour {
     // 爆炸动画: 期间 busyCount_+1(锁相机), 结束后 -1
     private IEnumerator PlayExplosionAnimBusy(float x, float y) {
         busyCount_++;
+        DBGLogT("Battle", $"Explosion +1 → busyCount={busyCount_} at ({x:F0},{y:F0})");
         yield return PlayExplosionAnim(x, y);
         busyCount_ = Mathf.Max(0, busyCount_ - 1);
+        DBGLogT("Battle", $"Explosion -1 → busyCount={busyCount_}");
     }
 
     // 4帧爆炸动画(explosion0~3): 逐帧变大(40→70→100→130), 每帧 90ms, 按 1f PPU 原尺寸
@@ -467,15 +500,22 @@ public class BattleField : MonoBehaviour {
         switch (camMode_) {
             case CamMode.Intro: {
                 // 固定速度平移(复刻旧 Camera::update 的 m_panSpeed*dt 线性移动)
+                // 关键修复: 用 clamp 后的 target 算 dist/方向(与 IsCamReachedTarget 一致)。
+                // 否则玩家在相机边界外时原始 camTarget_ 永远到不了, dist 恒 > 2f,
+                // 而 ApplyCamCenter 内部 clamp 又让相机第一帧就贴边界——结果相机不动,
+                // Update 一直以为没到, IsCamReachedTarget 早晚求值时机不一致就会卡 WaitUntil。
                 Vector3 p = battleCam.transform.position;
-                float dx = camTarget_.x - p.x;
-                float dy = camTarget_.y - p.y;
+                ClampCamBounds(out float minX, out float maxX, out float minY, out float maxY);
+                float tx = Mathf.Clamp(camTarget_.x, minX, maxX);
+                float ty = Mathf.Clamp(camTarget_.y, minY, maxY);
+                float dx = tx - p.x;
+                float dy = ty - p.y;
                 float dist = Mathf.Sqrt(dx * dx + dy * dy);
                 if (dist < 2f) {
-                    ApplyCamCenter(camTarget_.x, camTarget_.y);   // 到位
+                    ApplyCamCenter(tx, ty);   // 到位
                 } else {
                     float step = camIntroSpeed_ * dt;
-                    if (step >= dist) ApplyCamCenter(camTarget_.x, camTarget_.y);
+                    if (step >= dist) ApplyCamCenter(tx, ty);
                     else ApplyCamCenter(p.x + dx / dist * step, p.y + dy / dist * step);
                 }
                 break;

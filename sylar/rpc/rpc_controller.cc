@@ -1,3 +1,4 @@
+// RPC Controller：承载调用状态（失败/错误/traceId），实现 google::protobuf::RpcController 接口。
 #include "rpc_controller.h"
 
 namespace sylar {
@@ -11,9 +12,11 @@ RpcController::RpcController()
 RpcController::~RpcController() {
 }
 
+// 复位状态：清空失败标志与 traceId。
 void RpcController::Reset() {
     m_failed = false;
     m_errText = "";
+    m_traceId.clear();
 }
 
 bool RpcController::Failed() const {
@@ -29,6 +32,7 @@ void RpcController::SetFailed(const std::string& reason) {
     m_errText = reason;
 }
 
+// 取消相关接口本实现未启用，保留为空以满足 protobuf 接口契约。
 void RpcController::StartCancel() {
 }
 
@@ -39,5 +43,5 @@ bool RpcController::IsCanceled() const {
 void RpcController::NotifyOnCancel(google::protobuf::Closure* callback) {
 }
 
-}
-}
+}   // namespace rpc
+}   // namespace sylar

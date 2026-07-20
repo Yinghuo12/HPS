@@ -53,11 +53,14 @@ include_directories(
 )
 
 # ---- 公共源(common + service_base) ----
+# 注: redis_pool 仅 data 服务需要, 但当前 DDT_COMMON_SRC 编入全部服务。
+#     redis_pool.cc 仅依赖 hiredis(已在 DDT_SRV_LIBS), 非空编译产物无副作用。
 set(DDT_COMMON_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/common/frame.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/common/ddt_physics.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/common/terrain2d.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/server/service_base.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/data/redis_pool.cc
 )
 set(DDT_PB_SRC
     ${DDT_PB_DIR}/common.pb.cc
@@ -142,4 +145,16 @@ add_executable(test_battle_smoke
 add_dependencies(test_battle_smoke ddt_srv_pb sylar)
 target_link_libraries(test_battle_smoke ${DDT_SRV_LIBS})
 force_redefine_file_macro_for_sources(test_battle_smoke)
+set_target_properties(test_battle_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
+
+# ---- test_save_record_smoke: §13 多人战绩落库(拆主子表)验证 ----
+add_executable(test_save_record_smoke
+    ${CMAKE_SOURCE_DIR}/tests/test_save_record_smoke.cc
+    ${DDT_PB_DIR}/common.pb.cc
+    ${DDT_PB_DIR}/rpc.pb.cc
+)
+add_dependencies(test_save_record_smoke ddt_srv_pb sylar)
+target_link_libraries(test_save_record_smoke ${DDT_SRV_LIBS})
+force_redefine_file_macro_for_sources(test_save_record_smoke)
+set_target_properties(test_save_record_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
 set_target_properties(test_battle_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
