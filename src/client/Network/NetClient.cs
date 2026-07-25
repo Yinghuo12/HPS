@@ -299,8 +299,12 @@ public class NetClient {
     private static void EnqueueMain(Action a) {
         // 队列满时丢弃旧消息(心跳/聊天等非关键消息), 防止后台积压导致切回卡死
         if (mainThreadQueue.Count > MAX_QUEUE) {
+            int dropped = 0;
             Action discarded;
-            while (mainThreadQueue.Count > MAX_QUEUE - 100 && mainThreadQueue.TryDequeue(out discarded)) {}
+            while (mainThreadQueue.Count > MAX_QUEUE - 100 && mainThreadQueue.TryDequeue(out discarded)) { dropped++; }
+            // 关键告警: 队列满意味着主线程长时间未排空(卡顿/后台), 丢弃的消息可能含
+            // TURN_START/SHOOT_RESULT 等关键状态消息 → 客户端状态机会卡住。
+            Debug.LogWarning($"[NetClient] main queue FULL, dropped {dropped} callbacks (possible missed TURN_START/SHOOT_RESULT)");
         }
         mainThreadQueue.Enqueue(a);
     }

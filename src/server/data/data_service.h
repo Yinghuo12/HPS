@@ -5,6 +5,7 @@
 
 #include "rpc.pb.h"
 #include "redis_pool.h"
+#include "db_worker.h"
 #include "sylar/orm/connection_pool.h"
 
 namespace ddt {
@@ -20,10 +21,11 @@ public:
     ~DataServiceImpl();
 
     // 初始化连接池/Redis。失败返回 false。
-    // §10: redisPoolSize 控制 Redis 连接池上限, 替代原单连接。
     bool init(const std::string& dbHost, int dbPort, const std::string& dbUser,
               const std::string& dbPass, const std::string& dbName, int poolSize,
               const std::string& redisHost, int redisPort, int redisPoolSize);
+
+    void setDbPool(DbWorkerPool* pool) { m_dbPool = pool; }
 
     // ---- DataService RPC 方法实现 ----
     void CreateAccount(::google::protobuf::RpcController* controller,
@@ -107,9 +109,8 @@ private:
     sylar::ConnectionPool* pool() { return m_pool.get(); }
 
     std::shared_ptr<sylar::ConnectionPool> m_pool;
-    // §10: Redis 连接池(替代原 void* m_redis + mutex)。
-    // 借出/归还由 RedisGuard RAII 完成, token 操作并行化。
     std::shared_ptr<RedisPool> m_redisPool;
+    DbWorkerPool* m_dbPool = nullptr;
 };
 
 } // namespace ddt

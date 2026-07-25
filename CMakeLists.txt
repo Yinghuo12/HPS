@@ -5,7 +5,7 @@ include(FetchContent)
 include(cmake/utils.cmake)
 
 set(CMAKE_VERBOSE_MAKEFILE ON)
-set(CMAKE_CXX_FLAGS "$ENV{CXXFLAGS} -rdynamic -O0 -ggdb -std=c++11 -Wall -Wno-deprecated -Wno-unused-function -Wno-builtin-macro-redefined -Wno-deprecated-declarations -Wno-pessimizing-move")
+set(CMAKE_CXX_FLAGS "$ENV{CXXFLAGS} -rdynamic -O0 -ggdb -std=c++17 -Wall -Wno-deprecated -Wno-unused-function -Wno-builtin-macro-redefined -Wno-deprecated-declarations -Wno-pessimizing-move")
 
 # === OpenSSL ===
 find_package(OpenSSL REQUIRED)
@@ -127,10 +127,6 @@ target_link_libraries(sylar PUBLIC
 if(etcd-cpp-api_FOUND)
     target_link_libraries(sylar PUBLIC etcd-cpp-api)
 endif()
-# etcd_client.cc 依赖 etcd-cpp-apiv3（C++17），单独提升该源文件标准。
-set_source_files_properties(
-    "${CMAKE_SOURCE_DIR}/sylar/rpc/etcd_client.cc"
-    PROPERTIES COMPILE_OPTIONS "-std=c++17")
 
 # RPC_SRC 已由上方的 add_subdirectory(sylar/rpc) 提供并编入 libsylar
 # （rpc_test_* 仍可直接编译 RPC_SRC，但 libsylar 自带 RPC 符号，消费者无需重复）。
@@ -188,11 +184,10 @@ add_executable(test_ws_server tests/test_ws_server.cc)
 add_executable(test_ws_client tests/test_ws_client.cc)
 add_executable(chat_room sylar/examples/chat/chat_main.cc sylar/examples/chat/protocol.cc sylar/examples/chat/resource_servlet.cc sylar/examples/chat/chat_servlet.cc)
 
-# === Protobuf (DDT 新版微服务 + 旧 rpc_test 共用) ===
+# === Protobuf ===
 find_package(Protobuf REQUIRED)
 
 # DDT 游戏微服务 (gate/login/lobby/battle/data)
-# 旧版单体(src_old) + ImGui 客户端(src_old/client) 已归档, 不再构建。
 add_subdirectory(src)
 
 
@@ -216,7 +211,6 @@ add_custom_target(rpc_pb DEPENDS
 include_directories(${RPC_PB_DIR})
 
 # === etcd-cpp-apiv3（C++17 + gRPC）：仅用于 RPC 模块的 etcd_client.cc ===
-# 其余 rpc 源及 core/net/http/util 等仍按全局 -std=c++11 编译，互不影响。
 find_package(etcd-cpp-api CONFIG QUIET)
 if(etcd-cpp-api_FOUND)
     message(STATUS "etcd-cpp-apiv3: found (target etcd-cpp-api)")

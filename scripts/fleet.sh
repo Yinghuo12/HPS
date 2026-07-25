@@ -11,11 +11,13 @@ SERVS=(login gate lobby battle data)
 # 进程匹配模式: 按二进制名精确匹配所有路径形式(含 ./ddt_xxx 相对路径)
 PATTERN="ddt_(login|gate|lobby|battle|data)[ ]"
 
-# 杀掉所有 5 服务进程(不限路径), 重试 2 次确保杀干净
+# 杀掉所有 5 服务进程(不限路径), 确保杀干净。
+# busy-loop 进程(co busy-loop 独占线程)无法响应 SIGTERM(信号处理协程不被调度),
+# 故先 SIGKILL 直接强杀, 再确认无残留。
 kill_all_ddt() {
-    pkill -f "$PATTERN" 2>/dev/null || true
+    pkill -9 -f "$PATTERN" 2>/dev/null || true
     sleep 1
-    # 兜底: 仍残留的强杀
+    # 兜底: 仍残留(极端情况, 如 pid 被 namespace 隔离)再杀一轮
     if pgrep -f "$PATTERN" >/dev/null 2>&1; then
         pkill -9 -f "$PATTERN" 2>/dev/null || true
         sleep 1

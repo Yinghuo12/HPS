@@ -83,9 +83,9 @@ int main(int argc, char** argv) {
             }
         };
 
-        // 注入 data 服 channel(战绩落库用)
+        // 注入 data 服 channel: 统一走 pool(与 push 共用连接池)
         auto impl = std::make_shared<ddt::BattleServiceImpl>(cfg, push, tw, bpush,
-            std::make_shared<sylar::rpc::RpcChannel>(cfg.etcd_endpoint));
+            std::make_shared<sylar::rpc::RpcChannel>(cfg.etcd_endpoint, rpcPool.get()));
         auto provider = std::make_shared<sylar::rpc::RpcProvider>();
         provider->setEtcd(cfg.etcd_endpoint, cfg.etcd_ttl);
         provider->setListen((uint16_t)cfg.port);

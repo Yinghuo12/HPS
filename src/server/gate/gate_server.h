@@ -2,7 +2,6 @@
 #define __DDT_GATE_SERVER_H__
 
 #include <atomic>
-#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -16,34 +15,38 @@
 #include "rpc.pb.h"
 #include "service_base.h"
 #include "sylar/core/thread.h"
+#include "sylar/net/async_socket_stream.h"
 #include "sylar/net/tcp_server.h"
 #include "sylar/rpc/rpc_channel.h"
+#include "sylar/rpc/rpc_channel_pool.h"
 #include "sylar/rpc/rpc_controller.h"
 #include "sylar/scheduler/iomanager.h"
-#include "sylar/scheduler/timewheel.h"   // TimeWheel(心跳定时器迁移)
+#include "sylar/scheduler/timewheel.h"
 
 namespace ddt {
+
+// 仅发送的异步流(gate 不需要 doRecv, 自己在 handleClient 里读)
+class GateSendStream : public sylar::AsyncSocketStream {
+public:
+    typedef std::shared_ptr<GateSendStream> ptr;
+    GateSendStream(sylar::Socket::ptr sock)
+        : AsyncSocketStream(sock, false) {
+    }
+    // gate 自己读帧, doRecv 不使用
+    Ctx::ptr doRecv() override { return nullptr; }
+};
 
 // 客户端会话(每 TCP 连接一个)
 struct ClientSession {
     typedef std::shared_ptr<ClientSession> ptr;
     sylar::Socket::ptr sock;
-    uint64_t accountId = 0;        // 0=未登录
+    GateSendStream::ptr stream;     // 异步发送流(替代手搓 sendQueue)
+    uint64_t accountId = 0;
     std::string name;
-    std::string token;             // 登录 token(登出时删 Redis 用)
-    Gender gender = GENDER_NONE;   // 0=未选择 1=男 2=女
+    std::string token;
+    Gender gender = GENDER_NONE;
     uint64_t lastRecvMs = 0;
-    uint64_t gatewayId = 0;        // 本 gate 实例 ID(预留多 gate)
-
-    // 发送队列: 保证同一 fd 同一时刻只有一个协程在 send。
-    // 根因: handleClient 协程与 PushService RPC 协程(多个)并发向同一 sock 发数据时,
-    // 若某次 send 遇 EAGAIN, hook 的 do_io 会 addEvent(fd, WRITE) 挂起当前协程;
-    // 第二个协程对同 fd 再 send 也会 addEvent(WRITE), 触发 sylar 的
-    // SYLAR_ASSERT(!(fd_ctx->events & event))(iomanager.cc:119) → abort() → gate 进程崩溃。
-    // 入队后由按需启动的 drainAndSend 协程串行消费, 从根本上消除该竞态。
-    sylar::Spinlock sendMutex;            // 仅保护 sendQueue/sendBusy(锁内纯内存操作, 不 yield)
-    std::deque<std::string> sendQueue;    // 已组帧的完整包([4B len][2B msgid][pb])
-    bool sendBusy = false;                // 是否有发送协程正在消费队列(去重启动)
+    uint64_t gatewayId = 0;
 };
 
 // 客户端 TCP 入口。处理帧解析、token 校验、msg_id 分发, 并实现 PushService 供 battle/lobby 推送。
@@ -61,6 +64,8 @@ public:
     void setRedis(const std::string& host, int port) { m_redisHost = host; m_redisPort = port; }
     // 启动 Redis 订阅线程(chat:world), 由 gate_main 在 bind 后调一次。
     void startWorldChatSubscriber();
+    // 设置 RPC 连接池(4 个下游服务统一走多路复用)。
+    void setRpcPool(std::shared_ptr<sylar::rpc::RpcChannelPool> pool) { m_rpcPool = pool; }
 
 protected:
     // TcpServer: 每连接一个光纤
@@ -80,9 +85,6 @@ protected:
 private:
     // 发一条帧消息给指定 session(入队, 按需启动发送协程)
     void sendToSession(ClientSession::ptr s, uint16_t msgId, const std::string& payload);
-    // 串行消费 session 发送队列: 发空即退(非常驻)。
-    // 保证同一 fd 至多一个协程在 do_io(WRITE), 消除并发 send 触发的 sylar ASSERT。
-    static void drainAndSend(ClientSession::ptr s);
     void sendError(ClientSession::ptr s, int code, const std::string& msg);
 
     // §6 构造带 traceId 的 RPC controller(22 个 onXxx handler 统一入口)。
@@ -149,12 +151,9 @@ private:
     std::map<uint64_t /*accountId*/, ClientSession::ptr> m_accountToSession;
     std::map<sylar::Socket*, ClientSession::ptr> m_sockToSession;
 
-    // RPC channel 缓存
-    std::mutex m_chanMutex;
-    std::shared_ptr<sylar::rpc::RpcChannel> m_lobbyChan;
-    std::shared_ptr<sylar::rpc::RpcChannel> m_battleChan;
-    std::shared_ptr<sylar::rpc::RpcChannel> m_loginChan;
-    std::shared_ptr<sylar::rpc::RpcChannel> m_dataChan;
+    // RPC channel 池: 4 个下游服务(login/lobby/battle/data)统一走多路复用长连接。
+    // 替代原 4 个独立短连接 channel(每次 RPC 建 TCP→send→close)。
+    std::shared_ptr<sylar::rpc::RpcChannelPool> m_rpcPool;
 
     // Redis 订阅(世界聊天广播)。独立线程, 长期阻塞 redisGetReply。
     std::shared_ptr<Subscriber> m_subscriber;

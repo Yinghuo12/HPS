@@ -160,40 +160,54 @@ void RpcProvider::handleClient(sylar::Socket::ptr client) {
 
         // 调用业务方法
         Message* response = service->GetResponsePrototype(methodDesc).New();
-        Closure* done = NewCallback<RpcProvider, sylar::Socket::ptr, Message*>(
-            this, &RpcProvider::sendResponse, client, response);
-        // §6: 构造 RpcController 实例，把 traceId 注入，供 impl 端读取用于日志关联。
-        // CallMethod 同步执行，done 内同步 sendResponse，返回后立即 delete。
+        uint32_t reqId = rpcHeader.request_id();
+        // 手动 Closure: 业务 impl 完成后调 done->Run() 发送响应。
+        // (NewCallback 最多 2 参数, sendResponse 需要 3 参数)
+        Socket::ptr clientSock = client;
+        // 用 protobuf 的 NewCallback 配合静态中转函数
+        struct ResponseClosure {
+            RpcProvider* self;
+            Socket::ptr sock;
+            Message* response;
+            uint32_t reqId;
+            static void run(ResponseClosure* c) {
+                c->self->sendResponse(c->sock, c->response, c->reqId);
+                delete c;
+            }
+        };
+        ResponseClosure* rc = new ResponseClosure{this, clientSock, response, reqId};
+        Closure* done = google::protobuf::NewCallback(&ResponseClosure::run, rc);
         sylar::rpc::RpcController* ctrl = new sylar::rpc::RpcController();
-        if (!traceId.empty()) {
+        if(!traceId.empty()) {
             ctrl->SetTraceId(traceId);
         }
         service->CallMethod(methodDesc, ctrl, request, response, done);
         delete request;
         delete ctrl;
 
-        // 一连接一请求：处理完即退出循环，由 TcpServer 回收连接。
-        // (曾尝试 keep-alive 循环复用连接，但高频推送下出现 stack smashing，
-        //  根因是连接复用时数据流错位风险；回退为短连接最稳妥。)
-        break;
+        // 长连接循环: 处理完不退出, 继续等下一个请求。
+        // request_id 匹配解决了旧版数据流错位导致的 stack smashing。
     }
 }
 
-// 同步发送响应：[4-byte size][response body]，发完即关连接。
-void RpcProvider::sendResponse(sylar::Socket::ptr sock, Message* response) {
+// 同步发送响应：[4-byte response_size][4-byte request_id][response body]，发完不关连接。
+void RpcProvider::sendResponse(sylar::Socket::ptr sock, Message* response, uint32_t request_id) {
     std::string responseStr;
-    if (response->SerializeToString(&responseStr)) {
-        uint32_t size = sylar::byteswapOnLittleEndian((uint32_t)responseStr.size());
+    if(response->SerializeToString(&responseStr)) {
+        // 响应头: [4B size(不含自身) ][4B request_id][body]
+        // size = sizeof(request_id) + body.size() = 4 + body.size()
+        uint32_t totalSize = (uint32_t)(sizeof(uint32_t) + responseStr.size());
+        uint32_t netSize = sylar::byteswapOnLittleEndian(totalSize);
+        uint32_t netReqId = sylar::byteswapOnLittleEndian(request_id);
         std::string packet;
-        packet.append(reinterpret_cast<char*>(&size), 4);
+        packet.append(reinterpret_cast<char*>(&netSize), 4);
+        packet.append(reinterpret_cast<char*>(&netReqId), 4);
         packet.append(responseStr);
         sock->send(packet.c_str(), packet.size());
-        SYLAR_LOG_INFO(g_rpclogger) << "rpc response sent, size=" << responseStr.size();
     } else {
         SYLAR_LOG_ERROR(g_rpclogger) << "failed to serialize response";
     }
     delete response;
-    sock->close();
 }
 
 }   // namespace rpc

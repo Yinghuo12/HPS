@@ -26,8 +26,9 @@ int main(int argc, char** argv) {
     iom.schedule([&]() {
         auto impl = std::make_shared<ddt::LobbyServiceImpl>(cfg.etcd_endpoint);
 
-        // RPC 连接池: lobby→gate 推送高频, 用池复用 TCP + etcd 发现缓存
+        // RPC 连接池: lobby→gate 推送 + lobby→data/battle 统一走多路复用长连接。
         auto rpcPool = std::make_shared<sylar::rpc::RpcChannelPool>(cfg.etcd_endpoint, 8);
+        impl->setRpcPool(rpcPool);
 
         // 注入推送闭包: lobby -> gate 的 PushService.NotifyClient
         // 异步投到独立协程执行, 避免撑爆 RPC 入口协程栈

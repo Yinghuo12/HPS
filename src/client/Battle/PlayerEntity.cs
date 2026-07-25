@@ -37,6 +37,10 @@ public class PlayerEntity : MonoBehaviour {
     public int Direction { get; private set; }  // 1=右 -1=左
     public string DisplayName { get; private set; } = "";   // 显示名(顶部卡片用)
 
+    // 位置插值(消除瞬移/卡顿): SetState 设目标, Update 每帧 lerp 靠近。
+    private float targetX_, targetY_;
+    private bool posInited_ = false;   // 首次 SetState 直接定位(无插值)
+
     public void Init(ulong accId, string name, bool me, Color color, Ddt.TeamSide teamSide = Ddt.TeamSide.TeamRed, Ddt.Gender genderSide = Ddt.Gender.None) {
         accountId = accId;
         team = teamSide;
@@ -72,6 +76,14 @@ public class PlayerEntity : MonoBehaviour {
         return null;
     }
 
+    /// <summary>强制设位置(降落动画用): 直接写 transform + target, 不触发坡度/HP/Sprite 更新。</summary>
+    public void ForcePosition(Vector3 pos) {
+        X = pos.x; Y = pos.y;
+        targetX_ = pos.x; targetY_ = pos.y;
+        transform.position = pos;
+        posInited_ = true;
+    }
+
     public void SetState(float x, float y, int hp, int maxHp, int angle, int direction) {
         X = x; Y = y; Hp = hp; MaxHp = maxHp; Angle = angle; Direction = direction;
         // 视觉贴合地表: 用 2D 体素地形的 columnHeight 把脚贴到该列最高实体格, 不悬空。
@@ -81,14 +93,38 @@ public class PlayerEntity : MonoBehaviour {
             if (ix >= 0 && ix < terrain_.Width) groundY = terrain_.ColumnHeight(ix);
         }
         // 坠落死亡只由服务端权威 hp=0 决定, 不由本地地形猜。
-        // (方案 F 后服务端/客户端都是 2D 体素地形, "打穿"判定一致; 但死亡仍以服务端为准。)
         if (Hp <= 0 && !falling_) {
             StartCoroutine(PlayFallDeath());
         }
-        transform.position = new Vector3(x, groundY, 0f);
+        // 本机玩家: 每帧精确增量更新, 直接定位(lerp 会引入滞后 + 闪烁)。
+        // 远程玩家: 离散 RPC 更新(每 15px 一个), 用 lerp 平滑过渡。
+        targetX_ = x;
+        targetY_ = groundY;
+        if (isMe || !posInited_) {
+            posInited_ = true;
+            transform.position = new Vector3(x, groundY, 0f);
+        }
         UpdateSpriteForDirection(direction);
         UpdateHp();
         UpdateSlopeAndBarrel();
+    }
+
+    // 远程玩家位置插值: 消除 RPC 离散更新(每 15px 一个 MoveNotify)造成的瞬移。
+    // 本机玩家不插值(SetState 直接定位, 每帧增量精确)。
+    void Update() {
+        if (!posInited_ || falling_ || isMe) return;
+        Vector3 p = transform.position;
+        float dx = targetX_ - p.x, dy = targetY_ - p.y;
+        if (dx * dx + dy * dy < 0.25f) return;   // 已到位, 跳过
+        float k = 0.2f;   // 远程平滑系数(~6帧到位, 消除 15px RPC 跳变)
+        float smooth = 1f - Mathf.Exp(-k * Time.deltaTime * 60f);   // 帧率无关
+        float nx = p.x + dx * smooth;
+        float ny = p.y + dy * smooth;
+        // 大跳变(>200px, 如回合重置/传送): 直接到位, 不插值
+        if (Mathf.Abs(dx) > 200f) nx = targetX_;
+        if (Mathf.Abs(dy) > 200f) ny = targetY_;
+        p.x = nx; p.y = ny;
+        transform.position = p;
     }
 
     private bool falling_ = false;

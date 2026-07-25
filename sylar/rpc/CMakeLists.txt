@@ -1,4 +1,4 @@
-# RPC 层：编入 libsylar（含 rpc_controller/provider/channel/pool + etcd_client）。
+# RPC 层：编入 libsylar（含 rpc_controller/provider/channel/stream/pool + etcd_client）。
 # etcd_client.cc 依赖 etcd-cpp-apiv3（C++17），单独按 C++17 编译，其余源与 sylar 一起 C++11。
 # 另外上抛 RPC_SRC 供 rpc_test_callee/rpc_test_caller 直接编译（历史用法，保留兼容）。
 sylar_add_sources(
@@ -6,6 +6,8 @@ sylar_add_sources(
     rpc_provider.cc
     rpc_channel.cc
     rpc_channel_pool.cc
+    rpc_stream.cc
+    load_balance.cc
     etcd_client.cc
 )
 

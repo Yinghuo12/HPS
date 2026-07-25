@@ -41,22 +41,13 @@ LobbyServiceImpl::LobbyServiceImpl(const std::string& etcdEndpoint)
 LobbyServiceImpl::~LobbyServiceImpl() {
 }
 
-// 懒初始化 data 服 channel(锁内单例)
+// 统一走 RpcChannelPool(多路复用长连接), 替代原独立短连接 channel。
 std::shared_ptr<sylar::rpc::RpcChannel> LobbyServiceImpl::dataChannel() {
-    std::lock_guard<std::mutex> lk(m_channelMutex);
-    if (!m_dataChannel) {
-        m_dataChannel = std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint);
-    }
-    return m_dataChannel;
+    return std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint, m_rpcPool.get());
 }
 
-// 懒初始化 battle 服 channel(锁内单例)
 std::shared_ptr<sylar::rpc::RpcChannel> LobbyServiceImpl::battleChannel() {
-    std::lock_guard<std::mutex> lk(m_channelMutex);
-    if (!m_battleChannel) {
-        m_battleChannel = std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint);
-    }
-    return m_battleChannel;
+    return std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint, m_rpcPool.get());
 }
 
 // 找到玩家所在房间(假设已持锁)
@@ -554,7 +545,7 @@ void LobbyServiceImpl::FriendList(::google::protobuf::RpcController*,
 // 频道聊天(世界/房间/队伍)
 void LobbyServiceImpl::Chat(::google::protobuf::RpcController*,
         const ChatRpcReq* req, ResultResp* resp, ::google::protobuf::Closure* done) {
-    // 世界频道: 走 data.PublishWorldChat(持久化 + Redis PUBLISH, gate 订阅后 NotifyAllOnline)
+    // 世界频道: 走 data.PublishWorldChat(Redis List 缓存 + PUBLISH)
     if (req->channel() == CHANNEL_WORLD) {
         auto ch = dataChannel();
         ddt::DataService::Stub dataStub(ch.get());
@@ -573,20 +564,7 @@ void LobbyServiceImpl::Chat(::google::protobuf::RpcController*,
         return;
     }
 
-    // 其他频道(ROOM/TEAM): 持久化
-    if (req->channel() == CHANNEL_ROOM) {
-        auto ch = dataChannel();
-        ddt::DataService::Stub dataStub(ch.get());
-        sylar::rpc::RpcController ctrl;
-        SaveChatReq sreq;
-        sreq.set_channel(req->channel());
-        sreq.set_sender_id(req->account_id());
-        sreq.set_sender_name(req->name());
-        sreq.set_message(req->message());
-        ResultResp sresp;
-        dataStub.SaveChat(&ctrl, &sreq, &sresp, nullptr);
-    }
-    // 广播: ROOM -> 房内; TEAM -> 同队
+    // ROOM/TEAM: 不落盘(临时频道无回看价值), 直接广播
     if (m_push) {
         ChatNotify notify;
         notify.set_channel(req->channel());

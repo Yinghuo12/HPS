@@ -8,4 +8,5 @@ message RpcHeader {
     bytes  method_name  = 2;  // 方法名
     uint32 args_size    = 3;  // 序列化后的 args 长度
     string trace_id     = 4;  // 调用链追踪 ID（可选）
+    uint32 request_id   = 5;  // 请求唯一 ID（多路复用响应匹配）
 }

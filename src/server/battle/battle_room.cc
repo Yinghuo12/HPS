@@ -162,6 +162,12 @@ void BattleRoom::fillAllPlayers(google::protobuf::RepeatedPtrField<PlayerState>*
 
 // 异步广播: 投递到独立协程执行, 避免撑爆当前 RPC 协程栈
 void BattleRoom::broadcast(uint16_t msgId, const std::string& payload) {
+    // 关键消息(射击结果/回合切换/游戏结束)同步推送, 不走 schedule:
+    // 移动期间高频 MoveNotify 的 schedule 协程会积压在 IOManager 队列里,
+    // 若 ShootResult 也 schedule, 会排在 MoveNotify 后面 → 射击动画延迟启动。
+    bool urgent = (msgId == MSG_SHOOT_RESULT_NOTIFY
+                 || msgId == MSG_TURN_START_NOTIFY
+                 || msgId == MSG_GAME_OVER_NOTIFY);
     // 优先用批量推送闭包(1 次 RPC 推多人)
     if (m_bpush) {
         std::vector<uint64_t> ids;
@@ -170,8 +176,12 @@ void BattleRoom::broadcast(uint16_t msgId, const std::string& payload) {
             ids.push_back(p.accountId);
         }
         auto fn = m_bpush;
-        sylar::IOManager::GetThis()->schedule(
-            [fn, ids, msgId, payload]() { fn(ids, msgId, payload); });
+        if (urgent) {
+            fn(ids, msgId, payload);   // 同步: 立即发出, 不入队
+        } else {
+            sylar::IOManager::GetThis()->schedule(
+                [fn, ids, msgId, payload]() { fn(ids, msgId, payload); });
+        }
         return;
     }
     // 兜底: 无批量闭包时退回逐人单推(也异步化)
@@ -181,8 +191,12 @@ void BattleRoom::broadcast(uint16_t msgId, const std::string& payload) {
     for (const auto& p : m_players) {
         RoutingHandle h(p.accountId, p.gatewayId);
         auto fn = m_push;
-        sylar::IOManager::GetThis()->schedule(
-            [fn, h, msgId, payload]() { fn(h, msgId, payload); });
+        if (urgent) {
+            fn(h, msgId, payload);   // 同步
+        } else {
+            sylar::IOManager::GetThis()->schedule(
+                [fn, h, msgId, payload]() { fn(h, msgId, payload); });
+        }
     }
 }
 
@@ -326,7 +340,7 @@ void BattleRoom::onShoot(uint64_t accountId, int angle, double force, bool isFly
         // ★calculateDamage AOE(挖坑前算!): 用玩家当前位置(爆炸前的脚位)算距离,
         // 否则挖坑后 y 下降距落点变远, 伤害会被错误衰减到 0
         for (auto& p : m_players) {
-            if (p.accountId == shooter->accountId || !p.alive || p.hp <= 0) {
+            if (!p.alive || p.hp <= 0) {
                 continue;
             }
             int dmg = PhysicsEngine::calculateDamage(res.hit_x, res.hit_y, p.x, p.y,
@@ -342,7 +356,13 @@ void BattleRoom::onShoot(uint64_t accountId, int angle, double force, bool isFly
                     dt = ShootResultNotify::BLOCK;
                     finalDmg = dmg / 2;
                 }
-                p.hp = std::max(0, p.hp - finalDmg);
+                // 友军伤害: 自己和同队受 AOE 伤害但不致死(HP 最低 1); 敌方可致死。
+                bool isFriendly = (p.accountId == shooter->accountId || p.team == shooter->team);
+                if (isFriendly) {
+                    p.hp = std::max(1, p.hp - finalDmg);
+                } else {
+                    p.hp = std::max(0, p.hp - finalDmg);
+                }
                 shooter->damageDealt += finalDmg;   // 累计射手本局伤害(结算落库用)
                 // 记录第一个受影响玩家为主目标(协议单字段)
                 if (!hitPlayer) {
@@ -364,7 +384,8 @@ void BattleRoom::onShoot(uint64_t accountId, int angle, double force, bool isFly
             if (pix >= 0 && pix < m_terrain.width()) {
                 p.y = m_terrain.columnHeight(pix);
             }
-            // 该列完全打穿(columnHeight==0): 掉出地图死亡
+            // 该列完全打穿(columnHeight==0): 掉出地图坠落死亡(不分敌友)。
+            // 友军保护只限爆炸伤害(HP 保 1), 坠落照死。
             if (p.y <= 0.0f) {
                 p.alive = false;
                 p.hp = 0;
@@ -589,7 +610,7 @@ void BattleRoom::checkGameOver() {
     if (alive <= 1) {
         GameOverNotify n;
         n.set_reason("battle over");
-        TeamSide winningTeam = TEAM_RED;   // 默认(全员阵亡等异常场景)
+        TeamSide winningTeam = TEAM_RED;   // 默认
         bool foundWinner = false;
         // 找唯一存活者
         for (const auto& p : m_players) {
@@ -601,15 +622,20 @@ void BattleRoom::checkGameOver() {
                 break;
             }
         }
+        // 全员阵亡(同时坠落/同归于尽): 算当前出手方胜利。
+        // 出手方击杀了对手(或打穿了地形致其坠落), 自己也死了但判赢。
+        if (!foundWinner && !m_players.empty()) {
+            const auto& shooter = m_players[m_currentTurnIdx];
+            winningTeam = shooter.team;
+            n.set_winner_account_id(shooter.accountId);
+            n.set_winning_team(shooter.team);
+        }
         std::string payload;
         n.SerializeToString(&payload);
         broadcast(MSG_GAME_OVER_NOTIFY, payload);
         m_started = false;
         cancelTurnTimer();
 
-        // 战绩落库: 锁内快照 + 锁外 schedule 异步 RPC, 不阻塞 onShoot 协程。
-        // foundWinner=false 时(全员阵亡) winningTeam 用默认, 落库仍记全部玩家伤害。
-        (void)foundWinner;
         saveGameRecordLocked(winningTeam);
     }
 }

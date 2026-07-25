@@ -1,9 +1,11 @@
 // RPC 连接池：按 host 复用 keep-alive 连接 + 服务发现 TTL 缓存。
 #include "sylar/rpc/rpc_channel_pool.h"
+#include "sylar/rpc/rpc_stream.h"
 
 #include "sylar/core/log.h"
 #include "sylar/core/sys_util.h"   // GetCurrentMS
 #include "sylar/net/address.h"
+#include "sylar/scheduler/iomanager.h"
 
 namespace sylar {
 namespace rpc {
@@ -139,6 +141,51 @@ void RpcChannelPool::putDiscovery(const std::string& method_path, const std::str
     e.port = port;
     e.expireMs = sylar::GetCurrentMS() + m_discoveryTtlMs;
     m_discovery[method_path] = e;
+}
+
+// ---- 多路复用(RpcStream) ----
+std::shared_ptr<RpcStream> RpcChannelPool::acquireStream(const std::string& ip, uint16_t port) {
+    std::string key = hostKey(ip, port);
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        auto it = m_streamPool.find(key);
+        if(it != m_streamPool.end() && !it->second.empty()) {
+            auto stream = it->second.back();
+            it->second.pop_back();
+            if(stream->isConnected()) {
+                return stream;
+            }
+        }
+    }
+    // 新建 RpcStream
+    IPAddress::ptr addr = IPAddress::Create(ip.c_str(), port);
+    if(!addr) {
+        SYLAR_LOG_WARN(g_logger) << "pool acquireStream: invalid address " << ip << ":" << port;
+        return nullptr;
+    }
+    sylar::Socket::ptr sock = Socket::CreateTCP(addr);
+    if(!sock->connect(addr)) {
+        SYLAR_LOG_DEBUG(g_logger) << "pool acquireStream: connect fail " << ip << ":" << port;
+        return nullptr;
+    }
+    auto stream = std::make_shared<RpcStream>(sock, false);
+    stream->setIOManager(IOManager::GetThis());
+    stream->setWorker(IOManager::GetThis());
+    stream->start();
+    SYLAR_LOG_INFO(g_logger) << "pool acquireStream: new stream " << ip << ":" << port;
+    return stream;
+}
+
+void RpcChannelPool::releaseStream(const std::string& ip, uint16_t port, std::shared_ptr<RpcStream> stream) {
+    if(!stream) {
+        return;
+    }
+    std::string key = hostKey(ip, port);
+    std::lock_guard<std::mutex> lk(m_mutex);
+    if(stream->isConnected()) {
+        m_streamPool[key].push_back(stream);
+    }
+    // 不 close, 放回池供下次复用; 如果已断则不回池(shared_ptr 引用归零时析构)
 }
 
 }   // namespace rpc

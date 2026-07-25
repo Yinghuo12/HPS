@@ -39,11 +39,8 @@ LoginServiceImpl::~LoginServiceImpl() {
 }
 
 std::shared_ptr<sylar::rpc::RpcChannel> LoginServiceImpl::dataChannel() {
-    std::lock_guard<std::mutex> lk(m_channelMutex);
-    if(!m_dataChannel) {
-        m_dataChannel = std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint);
-    }
-    return m_dataChannel;
+    // 走 pool(多路复用长连接), 替代原短连接(每次新建 EtcdClient → stack smashing)。
+    return std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint, m_rpcPool.get());
 }
 
 bool LoginServiceImpl::validateName(const std::string& name) {

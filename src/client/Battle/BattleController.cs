@@ -64,13 +64,14 @@ public class BattleController : MonoBehaviour {
     private bool shotLocked_ = false;   // 本回合已射, 锁操作
     private float moveUsed_ = 0f;
     private float maxMovePerTurn_ = 200f;
-    // 缓冲的 TurnStartNotify: 射击结算期间(ShootResult 弹道回放)到达的回合切换通知。
-    // 延迟到弹丸落地+爆炸动画播完 + TURN_SWITCH_DELAY 后才应用(切回合 + 倒计时)。
-    // resolvingShoot_=true 期间缓冲; 首回合/Pass/超时(无弹道)直接应用。
-    private byte[] pendingTurnStartBytes_ = null;
-    private bool resolvingShoot_ = false;   // 正在回放弹道(OnShootResult 置 true)
-    // 弹丸落地后切换回合的额外延迟(秒): 给玩家看清爆炸/命中结果的缓冲。
-    private const float TURN_SWITCH_DELAY = 1.5f;
+    // 串行动作队列: 替代旧的 resolvingShoot_/camFrozenAfterShoot_/pendingTurnStart_ + 协调协程。
+    // 所有战斗消息(Shoot/TurnStart/Move/GameOver)转换为 BattleAction 入队, 串行执行。
+    // 队列非 idle 期间相机跟随让位(替代 camFrozenAfterShoot_)。
+    private BattleActionQueue actionQueue_;
+    // shotLocked_ 超时阈值(秒): 出手/Pass 后若超过此时间仍未收到 TurnStart(消息丢失/断线),
+    // 强制解锁操作, 避免永久卡在"已出手等待结果"。= 服务端 turn_timeout(10s) + 余量。
+    private const float SHOT_LOCK_TIMEOUT = 15f;
+    private float shotLockedSince_ = -1f;   // shotLocked_ 置 true 时的 Time.time, -1=未锁
 
     // 移动 RPC 节流: 累积移动距离超过阈值才发一次, 避免每帧发(60次/秒→~10次/秒)。
     // 松开移动键时补发最终位置, 保证服务端拿到精确坐标。
@@ -90,6 +91,9 @@ public class BattleController : MonoBehaviour {
 
     void Start() {
         DBGLogT("Battle", $"BattleController.Start me={Session.MyAccountId} hasPendingRoomReady={Session.PendingRoomReady != null} hasPendingTurnStart={Session.PendingTurnStart != null}");
+        // 创建动作队列(MonoBehaviour 生命周期驱动 Update)
+        actionQueue_ = gameObject.AddComponent<BattleActionQueue>();
+
         var disp = NetworkManager.Instance.Dispatcher;
         disp.Subscribe(MsgId.ROOM_READY_NOTIFY, OnRoomReady);
         disp.Subscribe(MsgId.TURN_START_NOTIFY, OnTurnStart);
@@ -98,6 +102,8 @@ public class BattleController : MonoBehaviour {
         disp.Subscribe(MsgId.GAME_OVER_NOTIFY, OnGameOver);
         disp.Subscribe(MsgId.OPPONENT_LEFT_NOTIFY, OnOpponentLeft);
         disp.Subscribe(MsgId.ERROR, OnError);
+        // 顶号: 战斗中同账号新登录, 旧连接被踢 → 停止重连 + 回登录界面
+        disp.Subscribe(MsgId.KICK_NOTIFY, OnKick);
 
         // 本机账号从 NetworkManager 取(登录后存的); 没存则用 Bootstrap/LoginUI 设的
         myAccountId_ = Session.MyAccountId;
@@ -133,6 +139,7 @@ public class BattleController : MonoBehaviour {
     void OnDestroy() {
         DBGLogT("Battle", "BattleController.OnDestroy");
         destroyed_ = true;   // 标记已销毁: 防止回大厅后僵尸回调访问已销毁的 field
+        if (actionQueue_ != null) actionQueue_.Clear();   // 清空待执行动作
         // 反注册订阅: MessageDispatcher 是 DontDestroyOnLoad 单例, 不退订会导致
         // 回大厅后本控制器已销毁但 dispatcher 仍持有僵尸回调(destroyed_ 守卫是兜底,
         // 显式 Unsubscribe 才是根治)。与 UIChat.OnDestroy 的退订模式对齐。
@@ -145,21 +152,40 @@ public class BattleController : MonoBehaviour {
             disp.Unsubscribe(MsgId.GAME_OVER_NOTIFY);
             disp.Unsubscribe(MsgId.OPPONENT_LEFT_NOTIFY);
             disp.Unsubscribe(MsgId.ERROR);
+            disp.Unsubscribe(MsgId.KICK_NOTIFY);
         }
     }
 
+    // 顶号: 同账号新登录, 旧连接被踢 → 停止重连 + 回登录界面
+    private void OnKick(byte[] bytes) {
+        if (destroyed_) return;
+        var m = KickNotify.Parser.ParseFrom(bytes);
+        Debug.Log($"[Battle] 被顶号踢出: {m.Msg}");
+        NetworkManager.Instance.StopReconnectAndRelogin();
+        NetworkManager.Instance.Client.Close();
+        Session.Clear();
+        UnityEngine.SceneManagement.SceneManager.LoadScene("LoginScene");
+    }
+
     void Update() {
-        // 摄像机跟随当前回合玩家: 仅当 降落完成 且 开场巡游(intro)结束 且 战场不忙碌
-        // (炮弹飞行 + 爆炸动画 + 纸飞机传送 全部播完才回到回合玩家)
-        // 且 用户未在小地图手动拖拽相机(手动模式下让位, 3 秒后自动回退)
+        // 摄像机跟随当前回合玩家: 仅当 降落完成 且 开场巡游(intro)结束 且 动作队列空闲
+        // (队列非空闲 = 正在播放弹道/爆炸/切回合动画, 此时让位, 避免相机跳回旧回合玩家)。
+        // 且 用户未在小地图手动拖拽相机(手动模式下让位, 3 秒后自动回退)。
         if (inited_ && field != null && field.IsLandingDone && field.IsIntroDone && turnAccountId_ != 0) {
-            if (!field.IsBusy && !field.IsCameraManual) {
+            if (actionQueue_ != null && actionQueue_.IsIdle && !field.IsCameraManual) {
                 var turnPlayer = field.GetPlayer(turnAccountId_);
                 if (turnPlayer != null) field.FocusCamera(turnPlayer.transform.position);
             }
         }
         // 2. 核心修复：当战斗初始化完成后，每帧持续更新 HUD 文本与蓄力条状态
         if (inited_) {
+            // shotLocked_ 超时兜底: 出手/Pass 后若超过 SHOT_LOCK_TIMEOUT 仍未收到 TurnStart
+            // (消息丢失/断线/服务端异常), 强制解锁让玩家不再卡在"已出手等待结果"。
+            if (shotLocked_ && shotLockedSince_ > 0f && Time.time - shotLockedSince_ > SHOT_LOCK_TIMEOUT) {
+                DBGLogT("Battle", $"shotLocked_ timeout ({SHOT_LOCK_TIMEOUT}s), force unlock");
+                shotLocked_ = false;
+                shotLockedSince_ = -1f;
+            }
             UpdateCountdown();   // 倒计时递减 + 显示
             UpdateHud();
 
@@ -230,182 +256,90 @@ public class BattleController : MonoBehaviour {
     }
 
     private void OnTurnStart(byte[] bytes) {
-        if (destroyed_) return;   // 退出战斗后本控制器已销毁, 忽略僵尸回调
-        // 客户端掌控回合切换时序: 弹道回放期间(field 忙 或 resolvingShoot_)到达的
-        // TurnStartNotify 缓冲, 延迟到弹丸落地+爆炸动画播完 + TURN_SWITCH_DELAY 后才应用。
-        // resolvingShoot_ 覆盖 ShootResult 已到但弹丸刚启动(IsBusy 可能还没置 true)的窗口;
-        // IsBusy 覆盖 TurnStart 在弹丸飞行中途到达的情况。
-        // 无弹道动画时(Pass/超时/首回合)直接应用。
-        bool busy = (field != null && field.IsBusy);
-        string action = (busy || resolvingShoot_) ? "BUFFER" : "APPLY";
-        DBGLogT("Battle", "OnTurnStart recv: resolving=" + resolvingShoot_ + " field.IsBusy=" + busy + " -> " + action);
-        if ((field != null && field.IsBusy) || resolvingShoot_) {
-            pendingTurnStartBytes_ = bytes;
-            return;
-        }
-        ApplyTurnStart(bytes);
+        if (destroyed_) return;
+        var m = TurnStartNotify.Parser.ParseFrom(bytes);
+        DBGLogT("Battle", $"OnTurnStart recv: turn={m.TurnNumber} acc={m.TurnAccountId}");
+        // 入队: 排在 ShootAction 后面时会自动等弹道播完(队列串行), 无需缓冲标志
+        actionQueue_.Enqueue(new TurnStartAction(this, m));
     }
 
-    // 真正应用 TurnStartNotify: 切回合 + 重置倒计时 + 刷新玩家位置 + 提示。
-    private void ApplyTurnStart(byte[] bytes) {
-        var m = TurnStartNotify.Parser.ParseFrom(bytes);
+    // 应用回合状态(TurnStartAction.Execute 调用): 切回合 + 重置倒计时 + 刷新位置。
+    // 位置刷新延迟到 IsBusy 清零(队列保证此时弹道已播完), 避免纸飞机射击者提前瞬移。
+    public void ApplyTurnState(TurnStartNotify m) {
         turnAccountId_ = m.TurnAccountId;
         myTurn_ = (m.TurnAccountId == myAccountId_);
         shotLocked_ = false;
+        shotLockedSince_ = -1f;
         moveUsed_ = 0f;
-        pendingMoveDist_ = 0f;   // 清空移动节流累积, 避免跨回合残留
+        pendingMoveDist_ = 0f;
         power_ = 0f;
         curWind_ = m.Wind;
-        // 自身回合开始: 纸飞机冷却 -1(用于上一回合发射后的冷却递减)
         if (myTurn_ && flyCooldown_ > 0) flyCooldown_--;
-        timeLeft_ = TURN_TIMEOUT;   // 重置倒计时
-        DBGLogT("Battle", $"ApplyTurnStart: turn={m.TurnNumber} turnAcc={m.TurnAccountId} myTurn={myTurn_} wind={m.Wind} timeLeft={timeLeft_}");
-        // 告诉战场当前回合玩家(intro 收尾 + 回合跟随 + Manual 回退 都用它)
+        timeLeft_ = TURN_TIMEOUT;
+        DBGLogT("Battle", $"ApplyTurnState: turn={m.TurnNumber} acc={m.TurnAccountId} myTurn={myTurn_} wind={m.Wind}");
         if (field) field.SetTurnPlayer(m.TurnAccountId);
-        // 关键: 用通知刷新玩家位置必须等战场不忙碌(炮弹飞行/爆炸/纸飞机动画播完)!
-        // 否则 TurnStartNotify 紧跟 ShootResultNotify 到达, 会立即把纸飞机射击者设到落点,
-        // 导致"刚发射人物就瞬移"(飞行动画还没播完)。
-        if (field) {
-            byte[] saved = bytes;   // 捕获, 协程里再解析
-            StartCoroutine(DelayedTurnStartPlayerUpdate(saved));
-        }
-        // 顶部玩家卡刷新(HP 可能变化)
-        RefreshTopCards();
-        // 回合提示 + 快速平移到当前回合玩家(intro 结束后)
-        StartCoroutine(ShowTurnPromptAndPan());
-        Debug.Log($"[Battle] turn {m.TurnNumber}: {(myTurn_ ? "MY" : "OPP")} turn, wind={m.Wind}");
-    }
-
-    // 弹丸落地+爆炸动画播完(IsBusy 清零)后, 再等 TURN_SWITCH_DELAY 才应用缓冲的
-    // TurnStartNotify(切回合 + 重置倒计时)。让玩家看清弹道结果后再切回合。
-    // 无论 TurnStart 是否已缓冲都启动: 解除 resolvingShoot_; 若有缓冲则应用。
-    private System.Collections.IEnumerator DelayedApplyTurnStart() {
-        DBGLogT("Battle", "DelayedApplyTurnStart START");
-        // 等战场不忙碌(炮弹飞行 + 爆炸 + KeepBusyFor 0.8s), 最多 6s 防卡死
-        float waited = 0f;
-        while (field != null && field.IsBusy && waited < 6f) {
-            waited += Time.deltaTime;
-            yield return null;
-        }
-        DBGLogT("Battle", $"DelayedApplyTurnStart field.IsBusy cleared (waited={waited:F1}s hasPending={pendingTurnStartBytes_ != null})");
-        // 再额外等 TURN_SWITCH_DELAY(看清爆炸/命中结果)
-        yield return new WaitForSeconds(TURN_SWITCH_DELAY);
-        resolvingShoot_ = false;
-        DBGLogT("Battle", $"DelayedApplyTurnStart resolvingShoot_=false (TURN_SWITCH_DELAY={TURN_SWITCH_DELAY}s elapsed)");
-        // 应用缓冲的回合切换(若有): TurnStart 在弹道期间到达被缓冲到这里
-        if (pendingTurnStartBytes_ != null && !destroyed_) {
-            byte[] saved = pendingTurnStartBytes_;
-            pendingTurnStartBytes_ = null;
-            DBGLogT("Battle", "DelayedApplyTurnStart applying buffered TurnStart");
-            ApplyTurnStart(saved);
-        } else {
-            DBGLogT("Battle", "DelayedApplyTurnStart no buffered TurnStart (will wait for new)");
-        }
-    }
-
-    // 延迟到战场不忙碌(炮弹/爆炸/纸飞机动画播完)再刷新玩家位置,
-    // 避免纸飞机射击者被 TurnStartNotify 提前设到落点(瞬移)。
-    private System.Collections.IEnumerator DelayedTurnStartPlayerUpdate(byte[] bytes) {
-        DBGLogT("Battle", "DelayedTurnStartPlayerUpdate START");
-        // 最多等 5 秒(防卡死), 期间战场忙碌就等
-        float waited = 0f;
-        while (field != null && field.IsBusy && waited < 5f) {
-            waited += Time.deltaTime;
-            yield return null;
-        }
-        DBGLogT("Battle", $"DelayedTurnStartPlayerUpdate applying (waited={waited:F1}s)");
-        var m = TurnStartNotify.Parser.ParseFrom(bytes);
+        // 刷新玩家位置(此时队列串行保证弹道已播完, 无瞬移风险)
         if (field) {
             foreach (var ps in m.Players) {
                 field.SetPlayerState(ps.AccountId, ps.X, ps.Y, ps.Hp, ps.MaxHp, ps.Angle, ps.Direction);
             }
         }
-        // 本机玩家角度同步到 UI
         if (myTurn_ && field && field.MyPlayer) baseAngle_ = field.MyPlayer.Angle;
         RefreshTopCards();
+        Debug.Log($"[Battle] turn {m.TurnNumber}: {(myTurn_ ? "MY" : "OPP")} turn, wind={m.Wind}");
     }
 
-    // 回合开始: 显示提示文字(1 秒后淡出) + 快速平移到当前回合玩家
-    private System.Collections.IEnumerator ShowTurnPromptAndPan() {
-        // 等 intro(开场巡游)结束, 再切回合镜头(最多等 10 秒, 防后台卡死)
-        float waited = 0f;
-        while (field != null && !field.IsIntroDone && waited < 10f) {
-            waited += Time.deltaTime;
+    // 回合提示显示 + 自动淡出(独立协程, 不阻塞动作队列)。
+    // 提示是纯视觉效果, 不应阻塞后续 ShootAction → 不放入队列等待。
+    public void ShowTurnPromptAndFade(bool myTurn) {
+        StartCoroutine(PromptFadeCoroutine(myTurn));
+    }
+
+    private System.Collections.IEnumerator PromptFadeCoroutine(bool myTurn) {
+        if (turnPromptText_ == null) yield break;
+        turnPromptText_.text = myTurn ? "轮到你出手啦!" : "对方回合";
+        turnPromptText_.color = myTurn ? new Color(0.4f, 1f, 0.5f, 1f) : new Color(1f, 0.7f, 0.3f, 1f);
+        turnPromptText_.gameObject.SetActive(true);
+        promptShowing_ = true;
+        yield return new WaitForSeconds(1f);
+        // 淡出 0.4 秒
+        float t = 0f;
+        Color c = turnPromptText_.color;
+        while (t < 0.4f) {
+            t += Time.deltaTime;
+            c.a = Mathf.Lerp(1f, 0f, t / 0.4f);
+            turnPromptText_.color = c;
             yield return null;
         }
-
-        if (turnPromptText_ != null) {
-            turnPromptText_.text = myTurn_ ? "轮到你出手啦!" : "对方回合";
-            turnPromptText_.color = myTurn_ ? new Color(0.4f, 1f, 0.5f, 1f) : new Color(1f, 0.7f, 0.3f, 1f);
-            turnPromptText_.gameObject.SetActive(true);
-            promptShowing_ = true;
-        }
-        // 快速平移到当前回合玩家
-        if (field != null && turnAccountId_ != 0) {
-            var p = field.GetPlayer(turnAccountId_);
-            if (p != null) field.PanToCamera(p.transform.position, 1500f);
-        }
-        // 提示停留 1 秒后淡出
-        yield return new WaitForSeconds(1f);
-        if (turnPromptText_ != null) {
-            // 淡出 0.4 秒
-            float t = 0f;
-            Color c = turnPromptText_.color;
-            while (t < 0.4f) {
-                t += Time.deltaTime;
-                c.a = Mathf.Lerp(1f, 0f, t / 0.4f);
-                turnPromptText_.color = c;
-                yield return null;
-            }
-            turnPromptText_.gameObject.SetActive(false);
-            c.a = 1f; turnPromptText_.color = c;   // 复位 alpha
-        }
+        turnPromptText_.gameObject.SetActive(false);
+        c.a = 1f; turnPromptText_.color = c;
         promptShowing_ = false;
     }
+
+    // 公共访问器(Action 子类用)
+    public BattleField Field => field;
+    public ulong TurnAccountId => turnAccountId_;
+    public bool MyTurn => myTurn_;
 
     private void OnShootResult(byte[] bytes) {
         if (destroyed_) return;
         var m = ShootResultNotify.Parser.ParseFrom(bytes);
         Debug.Log($"[Battle] shootresult: dir={m.Direction} angle={m.Angle} start=({m.StartX},{m.StartY}) hit=({m.HitX},{m.HitY}) isFly={m.IsFly}");
-        resolvingShoot_ = true;   // 标记弹道回放中: 缓冲紧随其后的 TurnStartNotify
-        DBGLogT("Battle", $"OnShootResult: resolvingShoot_=true shooter={m.ShooterId} hitPlayer={m.HitPlayer} dmg={m.Damage}");
-        // 回放弹道(本地复算, 按武器/纸飞机选弹丸贴图)
-        if (field && field.MyPlayer != null) {
-            field.PlayTrajectory(m.StartX, m.StartY, m.Angle, m.Direction, m.Force, m.Wind,
-                physics_, m.WeaponId, m.IsFly, () => {
-                    if (field) {
-                        foreach (var ps in m.UpdatedPlayers) {
-                            field.SetPlayerState(ps.AccountId, ps.X, ps.Y, ps.Hp, ps.MaxHp, ps.Angle, ps.Direction);
-                        }
-                        // 普通弹: 落点爆炸(挖坑 + 动画); 出界(飞出左右)不爆炸
-                        bool offscreen = (m.HitX < 0 || m.HitX > Ddt.Net.Battle.BattleField.WORLD_W);
-                        if (!m.IsFly && !offscreen) field.Explode(m.HitX, m.HitY, 50f);   // blast_radius=50, 与服务端一致
-                        // 命中玩家: 弹出伤害数字(在命中点)
-                        if (m.HitPlayer && m.Damage > 0) {
-                            bool crit = m.DamageType == ShootResultNotify.Types.DamageType.Critical;
-                            bool block = m.DamageType == ShootResultNotify.Types.DamageType.Block;
-                            field.ShowDamageText(m.HitX, m.HitY, m.Damage, crit, block);
-                        }
-                        // 落地后给延迟再移动相机(看清爆炸/传送结果)
-                        field.KeepBusyFor(0.8f);
-                    }
-                    RefreshTopCards();   // HP 变化后刷新顶部卡片
-                    Debug.Log($"[Battle] shoot result: hit={m.HitPlayer} dmg={m.Damage} type={m.DamageType} weapon={m.WeaponId} isFly={m.IsFly}");
-                    // 弹丸落地+爆炸动画播完(busy 清零)后, 再等 TURN_SWITCH_DELAY 才切回合。
-                    // 无论 TurnStartNotify 是否已缓冲, 都启动(需解除 resolvingShoot_)。
-                    StartCoroutine(DelayedApplyTurnStart());
-                });
-        }
+        DBGLogT("Battle", $"OnShootResult: shooter={m.ShooterId} hitPlayer={m.HitPlayer} dmg={m.Damage}");
+        // 入队: ShootAction.Execute 同步调 PlayTrajectory(炮弹立即 active),
+        // IsDone 轮询 !IsBusy → 天然等弹道+爆炸+停顿播完。TurnStart 排在后面自动有序。
+        actionQueue_.Enqueue(new ShootAction(field, m, physics_));
     }
 
     private void OnMove(byte[] bytes) {
         if (destroyed_) return;
         var m = MoveNotify.Parser.ParseFrom(bytes);
+        // 直接应用, 不入动作队列:
+        // MoveNotify 是高频纯位置更新, 入队会堆积在 ShootAction 前面 → 发射延迟。
+        // 位置更新不会与射击结算冲突(射击后服务端不再发 MoveNotify)。
         if (field) {
-            // 多人: 按 accountId 查找对应玩家更新位置(不依赖单一 OppPlayer)
             var target = field.GetPlayer(m.AccountId);
             if (target != null) {
-                // 由位移方向推断面朝向(向右 dir=1, 向左 dir=-1), 与服务端 onMove 一致
                 int dir = target.Direction;
                 if (m.NewX > target.X + 0.001f) dir = 1;
                 else if (m.NewX < target.X - 0.001f) dir = -1;
@@ -417,11 +351,16 @@ public class BattleController : MonoBehaviour {
     private void OnGameOver(byte[] bytes) {
         if (destroyed_) return;
         var m = GameOverNotify.Parser.ParseFrom(bytes);
+        // 入队: GameOverAction 执行后清空队列, 不再处理后续动作
+        actionQueue_.Enqueue(new GameOverAction(this, m));
+    }
+
+    // GameOverAction.Execute 调用: 显示结算面板(队列自身会标记 gameOver 并清空)
+    public void OnGameOver(GameOverNotify m) {
         myTurn_ = false;
         Debug.Log($"[Battle] GAME OVER! winner={m.WinnerAccountId} team={m.WinningTeam} reason={m.Reason}");
         bool iWon = m.WinnerAccountId == myAccountId_;
         if (!iWon && m.WinningTeam != 0) {
-            // 队伍模式: 看自己队伍是否=获胜队
             var me = field != null ? field.MyPlayer : null;
             if (me != null) iWon = ((int)me.team == (int)m.WinningTeam);
         }
@@ -580,7 +519,7 @@ public class BattleController : MonoBehaviour {
         // P 跳过
         if (Input.GetKeyDown(KeyCode.P)) {
             GameFacade.SendPass();
-            shotLocked_ = true;
+            LockShot();
         }
 
         // F 切换纸飞机(冷却中禁用)
@@ -591,7 +530,7 @@ public class BattleController : MonoBehaviour {
         float sendPower = power_;   // 先存, 发完再清零
         bool usedFly = useFly_;
         GameFacade.SendShoot(baseAngle_, sendPower, usedFly, Session.MyWeaponId);
-        shotLocked_ = true;   // 射后锁定, 等服务端结果
+        LockShot();   // 射后锁定, 等服务端结果
         power_ = 0f;
         // 用过纸飞机: 进入冷却(2 个自身回合), 并切回普通炮弹
         if (usedFly) {
@@ -671,7 +610,13 @@ public class BattleController : MonoBehaviour {
     public void OnPassClick() {
         if (!myTurn_ || shotLocked_) return;
         GameFacade.SendPass();
+        LockShot();
+    }
+
+    /// <summary>锁定操作(出手/Pass 后), 记录时间用于超时兜底。</summary>
+    private void LockShot() {
         shotLocked_ = true;
+        shotLockedSince_ = Time.time;
     }
 
     // 顶部玩家信息卡: 红队排左上, 蓝队排右上; HP=0 变灰

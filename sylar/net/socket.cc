@@ -231,6 +231,16 @@ bool Socket::close() {
     return false;
 }
 
+bool Socket::reconnect(uint64_t timeout_ms) {
+    if(!m_remoteAddress) {
+        return false;
+    }
+    // 先关闭旧连接再重新建连
+    close();
+    newSock();
+    return connect(m_remoteAddress, timeout_ms);
+}
+
 int Socket::send(const void* buffer, size_t length, int flags) {
     if(isConnected()) {
         return ::send(m_sock, buffer, length, flags);

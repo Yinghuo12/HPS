@@ -30,7 +30,7 @@ protected:
     void handleClient(sylar::Socket::ptr client) override;
 
 private:
-    void sendResponse(sylar::Socket::ptr sock, google::protobuf::Message* response);
+    void sendResponse(sylar::Socket::ptr sock, google::protobuf::Message* response, uint32_t request_id);
 
     using MethodMap = std::unordered_map<std::string, const google::protobuf::MethodDescriptor*>;
 

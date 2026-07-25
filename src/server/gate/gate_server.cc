@@ -6,6 +6,7 @@
 #include "gate.pb.h"
 #include "sylar/core/log.h"
 #include "sylar/core/sys_util.h"
+#include "sylar/net/async_socket_stream.h"
 #include "sylar/net/socket_stream.h"
 #include "sylar/rpc/rpc_channel.h"
 #include "sylar/rpc/rpc_controller.h"
@@ -156,14 +157,22 @@ void GateServer::kickExistingSession(uint64_t accountId) {
         }
     }
     if(old) {
-        // 发顶号通知后强制关闭旧连接
+        // 发顶号通知: 必须同步直接 socket send(不走 stream 异步队列),
+        // 否则 close 在 doWrite 消费前执行 → KICK_NOTIFY 没发出去 → 客户端只看到断线 → 自动重连。
         KickNotify n;
         n.set_code(409);
         n.set_msg("账号在别处登录");
         std::string payload;
         n.SerializeToString(&payload);
-        sendToSession(old, MSG_KICK_NOTIFY, payload);
-        if(old->sock) old->sock->close();
+        std::string pkt = Frame::encode(MSG_KICK_NOTIFY, payload);
+        if(old->sock) {
+            old->sock->send(pkt.c_str(), pkt.size());   // 同步发送, 不入 stream 队列
+        }
+        // 延迟关闭: 给 KICK_NOTIFY 一点时间到达客户端, 再关连接
+        auto sockToClose = old->sock;
+        sylar::IOManager::GetThis()->addTimer(200, [sockToClose]() {
+            sockToClose->close();
+        }, false);
         SYLAR_LOG_WARN(g_logger) << "gate: kick old session account=" << accountId;
     }
 }
@@ -175,48 +184,13 @@ ClientSession::ptr GateServer::sessionBySock(sylar::Socket::ptr sock) {
 }
 
 void GateServer::sendToSession(ClientSession::ptr s, uint16_t msgId, const std::string& payload) {
-    if(!s || !s->sock) return;
+    if(!s || !s->stream) {
+        return;
+    }
     std::string pkt = Frame::encode(msgId, payload);
-    // 入队: 同一 fd 的所有发送(handleClient 回包 + PushService 推送)都汇入此队列,
-    // 由按需启动的 drainAndSend 单协程串行消费, 杜绝并发 send。
-    bool needStart = false;
-    {
-        sylar::Spinlock::Lock lk(s->sendMutex);
-        s->sendQueue.push_back(std::move(pkt));
-        if(!s->sendBusy) {
-            s->sendBusy = true;   // 标记已有发送协程, 后续入队不再重复启动
-            needStart = true;
-        }
-    }
-    if(needStart) {
-        // 按需调度一个发送协程(发空即退, 非常驻)。
-        // 以值捕获 shared_ptr, 保证 drainAndSend 运行期间 session 不被析构。
-        sylar::IOManager::GetThis()->schedule([s]() {
-            GateServer::drainAndSend(s);
-        });
-    }
-}
-
-// 串行消费 session 发送队列。
-// 任意时刻同一 fd 至多一个本协程在跑(sendBusy 去重), 故 hook 的 do_io(WRITE)
-// 即便因 EAGAIN 挂起, 也不会有第二个协程对同 fd addEvent(WRITE), sylar ASSERT 不会再触发。
-void GateServer::drainAndSend(ClientSession::ptr s) {
-    while(true) {
-        std::string pkt;
-        {
-            sylar::Spinlock::Lock lk(s->sendMutex);
-            if(s->sendQueue.empty()) {
-                s->sendBusy = false;   // 发空, 允许下次 sendToSession 重新启动本协程
-                return;
-            }
-            pkt = std::move(s->sendQueue.front());
-            s->sendQueue.pop_front();
-        }
-        // send 在锁外执行(hook 的 do_io 可能 yield, 锁内不可持有太久)。
-        // 若连接已断/出错返回 <=0: readFixSize 会清理 session, 这里直接退出即可。
-        int64_t rt = s->sock->send(pkt.data(), pkt.size());
-        if(rt <= 0) return;
-    }
+    // AsyncSocketStream::send 内部入队 + FiberSemaphore 唤醒 doWrite 协程串行消费。
+    // 替代原手搓 sendQueue + drainAndSend, 语义等价但用 FiberSemaphore(协程级) 而非 Spinlock。
+    s->stream->send(pkt);
 }
 
 void GateServer::sendError(ClientSession::ptr s, int code, const std::string& msg) {
@@ -229,30 +203,19 @@ void GateServer::sendError(ClientSession::ptr s, int code, const std::string& ms
 }
 
 // ---- RPC channel ----
-// 短连接模式(无连接池): 每次 CallMethod 新建 socket+connect+close。
-// 连接池在 sylar hook 模型下存在 fd 复用竞态, 已回退。
+// 统一用 RpcChannelPool(多路复用长连接 + 发现缓存)。
+// 替代原 4 个独立短连接 channel(每次 RPC 建 TCP→send→close, 延迟高)。
 std::shared_ptr<sylar::rpc::RpcChannel> GateServer::lobbyChannel() {
-    std::lock_guard<std::mutex> lk(m_chanMutex);
-    if(!m_lobbyChan) m_lobbyChan = std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint);
-    return m_lobbyChan;
+    return std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint, m_rpcPool.get());
 }
-
 std::shared_ptr<sylar::rpc::RpcChannel> GateServer::battleChannel() {
-    std::lock_guard<std::mutex> lk(m_chanMutex);
-    if(!m_battleChan) m_battleChan = std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint);
-    return m_battleChan;
+    return std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint, m_rpcPool.get());
 }
-
 std::shared_ptr<sylar::rpc::RpcChannel> GateServer::loginChannel() {
-    std::lock_guard<std::mutex> lk(m_chanMutex);
-    if(!m_loginChan) m_loginChan = std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint);
-    return m_loginChan;
+    return std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint, m_rpcPool.get());
 }
-
 std::shared_ptr<sylar::rpc::RpcChannel> GateServer::dataChannel() {
-    std::lock_guard<std::mutex> lk(m_chanMutex);
-    if(!m_dataChan) m_dataChan = std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint);
-    return m_dataChan;
+    return std::make_shared<sylar::rpc::RpcChannel>(m_etcdEndpoint, m_rpcPool.get());
 }
 
 // ---- 主连接处理: 帧读取 + 分发 ----
@@ -261,6 +224,15 @@ void GateServer::handleClient(sylar::Socket::ptr client) {
     auto sess = std::make_shared<ClientSession>();
     sess->sock = client;
     sess->lastRecvMs = sylar::GetCurrentMS();
+    // 创建异步发送流。只启动 doWrite(纯发送), 不启动 doRead:
+    // GateSendStream::doRecv 恒返回 nullptr, 若让基类 doRead 运行会进入
+    // while(isConnected()) 空转(doRecv 不 break) → 非抢占式协程下独占线程
+    // → 4 个 IOManager 线程被打满后所有协程(含 doWrite)饿死 → 消息发不出去。
+    // gate 自己在下面的 while 循环里读帧, 不需要 AsyncSocketStream 的 doRead。
+    sess->stream = std::make_shared<GateSendStream>(client);
+    sess->stream->setIOManager(sylar::IOManager::GetThis());
+    sess->stream->setWorker(sylar::IOManager::GetThis());
+    sess->stream->startWrite();   // 只启动 doWrite 协程(FiberSemaphore 驱动串行消费发送队列)
     addSession(client, sess);
 
     sylar::SocketStream ss(client);

@@ -20,7 +20,11 @@ int main(int argc, char** argv) {
     sylar::IOManager iom(4, true, "login");
 
     iom.schedule([&]() {
+        // RPC 连接池: login→data 调用走多路复用长连接, 替代原短连接。
+        // 消除栈溢出根因(原每次 RPC 新建 EtcdClient 重对象 + 短连接)。
+        auto rpcPool = std::make_shared<sylar::rpc::RpcChannelPool>(cfg.etcd_endpoint, 8);
         auto impl = std::make_shared<ddt::LoginServiceImpl>(cfg.etcd_endpoint);
+        impl->setRpcPool(rpcPool);
         // 1) HTTP /login /register (供客户端明文登录)
         sylar::http::HttpServer::ptr http(new sylar::http::HttpServer(false, &iom, &iom));
         http->getServletDispatch()->addServlet("/login",
@@ -73,6 +77,7 @@ int main(int argc, char** argv) {
         provider->run();
 
         static std::shared_ptr<ddt::LoginServiceImpl> g_keepalive = impl;
+        static std::shared_ptr<sylar::rpc::RpcChannelPool> g_rpcPool = rpcPool;
     });
 
     runner.installSignal();

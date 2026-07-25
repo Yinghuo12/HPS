@@ -66,6 +66,9 @@ public:
     virtual bool listen(int backlog = SOMAXCONN);
     virtual bool close();
 
+    // 重连: 用已保存的远端地址重新建连(AsyncSocketStream autoConnect 用)。
+    bool reconnect(uint64_t timeout_ms = -1);
+
     virtual int send(const void* buffer, size_t length, int flags = 0);
     virtual int send(const iovec* buffers, size_t length, int flags = 0);
     virtual int sendTo(const void* buffer, size_t length, const Address::ptr to, int flags = 0);

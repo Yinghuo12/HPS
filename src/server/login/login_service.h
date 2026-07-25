@@ -6,6 +6,7 @@
 
 #include "rpc.pb.h"
 #include "sylar/rpc/rpc_channel.h"
+#include "sylar/rpc/rpc_channel_pool.h"
 
 namespace ddt {
 
@@ -17,6 +18,8 @@ public:
 
     explicit LoginServiceImpl(const std::string& etcdEndpoint);
     ~LoginServiceImpl();
+
+    void setRpcPool(std::shared_ptr<sylar::rpc::RpcChannelPool> pool) { m_rpcPool = pool; }
 
     // ---- RPC 方法 ----
     void ValidateToken(::google::protobuf::RpcController* controller,
@@ -45,12 +48,11 @@ private:
     uint64_t doLogin(const std::string& name, const std::string& password, std::string& token, std::string& err);
     uint64_t doRegister(const std::string& name, const std::string& password, std::string& err);
 
-    // 调 DataService RPC 的便捷封装
+    // 调 DataService RPC 的便捷封装: 走 RpcChannelPool(多路复用长连接)。
     std::shared_ptr<sylar::rpc::RpcChannel> dataChannel();
 
     std::string m_etcdEndpoint;
-    std::mutex m_channelMutex;
-    std::shared_ptr<sylar::rpc::RpcChannel> m_dataChannel;
+    std::shared_ptr<sylar::rpc::RpcChannelPool> m_rpcPool;
 };
 
 } // namespace ddt

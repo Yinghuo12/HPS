@@ -16,6 +16,13 @@ public class BattleField : MonoBehaviour {
     public TerrainRenderer terrain;
     public bool IsProjectileActive => projectile_ != null && projectile_.gameObject.activeSelf && projectile_.IsActive; // 炮弹是否在飞行
 
+    /// <summary>强制停止弹道回放(兜底: onComplete 未触发时清除残留炮弹, 防 IsBusy 永真)。</summary>
+    public void StopProjectile() {
+        if (projectile_ != null && projectile_.gameObject.activeSelf) {
+            projectile_.gameObject.SetActive(false);
+        }
+    }
+
     // "忙碌中"计数: 炮弹飞行 + 爆炸动画 + 纸飞机传送 + 落地后延迟 期间 > 0。
     // 此期间回合相机跟随让位, 必须等动画全部播完才回到回合玩家。
     private int busyCount_ = 0;
@@ -142,8 +149,76 @@ public class BattleField : MonoBehaviour {
             projGo.SetActive(false);
         }
 
-        // 开局降落动画: 玩家从空中落到地表
-        StartCoroutine(PlayLanding(allPlayers));
+        // 开场序列: 玩家降落 + 相机巡视 + 停留 → introDone。
+        // 全程只用固定时长的 WaitForSeconds(不依赖 WaitUntilCamReached, 避免相机竞态卡死)。
+        StartCoroutine(PlayIntro(allPlayers));
+    }
+
+    // 开场序列: 降落(等落地) → 逐玩家巡视 → 收尾到回合玩家 → 完成。
+    // 全程固定时长 WaitForSeconds, 不依赖 WaitUntilCamReached(避免 camTarget_ 竞态卡死)。
+    private IEnumerator PlayIntro(Google.Protobuf.Collections.RepeatedField<Ddt.PlayerState> allPlayers) {
+        DBGLogT("Battle", $"PlayIntro START players={allPlayers.Count} turnAcc={turnAccountId_}");
+        landingDone_ = false;
+        introDone_ = false;
+
+        // 1) 降落动画: 玩家从空中落到地表。
+        //    用 SetState 设位置(同步 targetX_/targetY_), 防 PlayerEntity 的 lerp Update
+        //    把玩家拉回旧 target。降落阶段每帧更新 target 跟随插值位置。
+        var landingData = new List<System.Tuple<PlayerEntity, Vector3>>();
+        foreach (var ps in allPlayers) {
+            var pe = GetPlayer(ps.AccountId);
+            if (pe == null) continue;
+            Vector3 ground = new Vector3(ps.X, ps.Y, 0);
+            // 先设到空中(初始位置), SetState 同步 target 防止 lerp 拉回
+            pe.SetState(ps.X, ps.Y + 500f, ps.Hp, ps.MaxHp, ps.Angle, ps.Direction);
+            landingData.Add(System.Tuple.Create(pe, ground));
+        }
+        if (battleCam != null && landingData.Count > 0) {
+            SnapCameraTo(landingData[0].Item1.transform.position);
+        }
+        float fallDur = 1.2f;
+        float fallEl = 0f;
+        while (fallEl < fallDur) {
+            fallEl += Time.deltaTime;
+            float t = Mathf.Clamp01(fallEl / fallDur);
+            float eased = t * t;   // 先慢后快(重力加速感)
+            foreach (var d in landingData) {
+                // 从天空(ground.y+500)插值到地表(ground), 直接写 transform+target
+                Vector3 sky = new Vector3(d.Item2.x, d.Item2.y + 500f, 0f);
+                Vector3 pos = Vector3.Lerp(sky, d.Item2, eased);
+                d.Item1.ForcePosition(pos);
+            }
+            // 相机跟随平均位置
+            if (landingData.Count > 0) {
+                Vector3 avg = Vector3.zero;
+                foreach (var d in landingData) avg += d.Item1.transform.position;
+                FocusCamera(avg /= landingData.Count);
+            }
+            yield return null;
+        }
+        // 降落完成: 精确贴地表
+        foreach (var d in landingData) d.Item1.ForcePosition(d.Item2);
+        landingDone_ = true;
+        DBGLogT("Battle", "PlayIntro landing done");
+
+        // 2) 逐玩家巡视: PanToCamera + 固定时长等待
+        foreach (var d in landingData) {
+            DBGLogT("Battle", $"PlayIntro pan → acc={d.Item1.accountId}");
+            PanToCamera(d.Item2, camIntroSpeed_);
+            yield return new WaitForSeconds(1.2f);
+        }
+
+        // 3) 收尾: 定位到本回合玩家
+        Vector3 finalPos = new Vector3(WORLD_W / 2f, WORLD_H / 2f, 0f);
+        if (turnAccountId_ != 0) {
+            var turn = GetPlayer(turnAccountId_);
+            if (turn != null) finalPos = turn.transform.position;
+        }
+        PanToCamera(finalPos, camIntroSpeed_);
+        yield return new WaitForSeconds(1.0f);
+
+        introDone_ = true;
+        DBGLogT("Battle", "PlayIntro DONE introDone_=true");
     }
 
     // 地图背景: 按 mapName 加载 bg_ghost / bg_rainbow, 铺满世界
@@ -162,111 +237,6 @@ public class BattleField : MonoBehaviour {
             bgRenderer_.size = new Vector2(WORLD_W, WORLD_H);
         }
         bgRenderer_.transform.position = new Vector3(WORLD_W / 2f, WORLD_H / 2f, 5);
-    }
-
-    // 开局降落: 所有玩家从 Y+800 按重力下落到地表(纯视觉, 不影响逻辑位置)
-    private IEnumerator PlayLanding(Google.Protobuf.Collections.RepeatedField<Ddt.PlayerState> allPlayers) {
-        DBGLogT("Battle", $"PlayLanding START players={allPlayers.Count}");
-        // 记录每个玩家的目标(地表)位置, 起始位置设为空中
-        var landingData = new List<System.Tuple<PlayerEntity, Vector3, Vector3>>();
-        foreach (var ps in allPlayers) {
-            var pe = GetPlayer(ps.AccountId);
-            if (pe == null) continue;
-            Vector3 ground = new Vector3(ps.X, ps.Y, 0);
-            Vector3 sky = new Vector3(ps.X, ps.Y + 800f, 0);
-            pe.transform.position = sky;
-            landingData.Add(System.Tuple.Create(pe, sky, ground));
-        }
-
-        // 摄像机先看天空区域(瞬移对准开场视野)
-        if (battleCam != null && landingData.Count > 0) {
-            SnapCameraTo(landingData[0].Item2);
-        }
-
-        float duration = 1.5f;
-        float elapsed = 0f;
-        while (elapsed < duration) {
-            elapsed += Time.deltaTime;
-            float t = Mathf.Clamp01(elapsed / duration);
-            // 缓动: 先快后慢(类似重力加速)
-            float eased = t * t;
-            foreach (var d in landingData) {
-                d.Item1.transform.position = Vector3.Lerp(d.Item2, d.Item3, eased);
-            }
-            // 摄像机跟随平均位置
-            if (landingData.Count > 0) {
-                Vector3 avg = Vector3.zero;
-                foreach (var d in landingData) avg += d.Item1.transform.position;
-                avg /= landingData.Count;
-                FocusCamera(avg);
-            }
-            yield return null;
-        }
-        // 确保最终位置精确
-        foreach (var d in landingData) d.Item1.transform.position = d.Item3;
-        landingDone_ = true;
-        DBGLogT("Battle", "PlayLanding DONE landingDone_=true");
-        // 降落完成后, 启动开场巡游: 逐个展示玩家 → 停在本回合玩家(复刻旧 CAM_INTRO)
-        StartCoroutine(PlayIntro(landingData));
-    }
-
-    // 开场巡游: 依次平移到每个玩家并停留, 最后切到本回合玩家(复刻旧 CAM_INTRO 多阶段)
-    private IEnumerator PlayIntro(List<System.Tuple<PlayerEntity, Vector3, Vector3>> landingData) {
-        DBGLogT("Battle", $"PlayIntro START n={landingData.Count} turnAcc={turnAccountId_} introDone_={introDone_}");
-        introDone_ = false;
-        yield return new WaitForSeconds(0.3f);
-
-        // 逐个玩家: 平移过去 + 停留 1.5s
-        // 超时兜底(INTRO_PAN_TIMEOUT): App Nap / 窗口最小化时 Update() 不再调用,
-        // camTarget_ 永远到不了, WaitUntil 会无限挂起 → introDone_ 永远 false →
-        // 倒计时永远显示"准备中"。改用带超时的等待: 超时强制视为到位, 推进到下一玩家。
-        int idx = 0;
-        foreach (var d in landingData) {
-            DBGLogT("Battle", $"PlayIntro pan#{idx} → acc={d.Item1.accountId} pos=({d.Item3.x:F0},{d.Item3.y:F0})");
-            PanToCamera(d.Item3, camIntroSpeed_);
-            yield return WaitUntilCamReachedOrTimeout();
-            yield return new WaitForSeconds(1.5f);   // 停留展示
-            idx++;
-        }
-
-        // 收尾: 平移到本回合玩家
-        PlayerEntity turn = turnAccountId_ != 0 ? GetPlayer(turnAccountId_) : null;
-        Vector3 finalPos = turn != null ? turn.transform.position
-                          : (landingData.Count > 0 ? landingData[0].Item3 : new Vector3(WORLD_W / 2f, WORLD_H / 2f, 0));
-        DBGLogT("Battle", $"PlayIntro final pan → turn={turnAccountId_} pos=({finalPos.x:F0},{finalPos.y:F0})");
-        PanToCamera(finalPos, 800f);
-        yield return WaitUntilCamReachedOrTimeout();
-
-        introDone_ = true;
-        DBGLogT("Battle", "PlayIntro DONE introDone_=true, handoff to BattleController");
-        // 进入回合跟随(由 BattleController.Update 每帧 FocusCamera 接管)
-    }
-
-    // 单个玩家位置的相机到位等待: WaitUntil + 超时兜底。
-    // 正常情况下相机在几帧内到位; 极端情况(玩家在边界外的边界奇点)超时强制推进。
-    private IEnumerator WaitUntilCamReachedOrTimeout() {
-        float waited = 0f;
-        const float TIMEOUT = 3f;   // 单次平移最长等 3 秒(正常 < 0.5s)
-        while (waited < TIMEOUT) {
-            if (IsCamReachedTarget()) yield break;
-            waited += Time.deltaTime;
-            yield return null;
-        }
-        // 超时: 强制视为到位(Update 下一帧自然会停在边界, 不影响后续)
-        Debug.LogWarning($"[Battle] intro pan timeout after {TIMEOUT}s, forcing advance");
-    }
-
-    // 相机是否已到达"可达目标": 把原始目标 clamp 到相机边界后, 与当前位置比对。
-    // 这样即使玩家在边界外(相机到不了), 相机贴到边界时也视为到达, 不会卡死 WaitUntil。
-    private bool IsCamReachedTarget() {
-        if (battleCam == null) return true;
-        ClampCamBounds(out float minX, out float maxX, out float minY, out float maxY);
-        float tx = Mathf.Clamp(camTarget_.x, minX, maxX);
-        float ty = Mathf.Clamp(camTarget_.y, minY, maxY);
-        Vector3 p = battleCam.transform.position;
-        float dx = p.x - tx;
-        float dy = p.y - ty;
-        return dx * dx + dy * dy < 2.5f * 2.5f;
     }
 
     public bool IsLandingDone => landingDone_;
@@ -298,7 +268,8 @@ public class BattleField : MonoBehaviour {
     /// 服务端下发 start_y: 普通弹=shooter.y(脚底, 客户端+60 炮口); 纸飞机=炮口 originY(已含+60)。</summary>
     public void PlayTrajectory(double startX, double startY, int baseAngle, int direction,
                                double force, float wind, PhysicsSim.PhysicsParams param,
-                               int weaponId, bool isFly, System.Action onComplete) {
+                               int weaponId, bool isFly, System.Action onComplete,
+                               float serverHitX = float.NaN, float serverHitY = float.NaN) {
         if (projectile_ == null || terrain == null) { onComplete?.Invoke(); return; }
         // 物理角度: 叠加发射点坡度(与服务端 onShoot 一致, 支持反抛)
         float slopeDeg = PhysicsSim.GetSlopeAngle((float)startX, terrain);
@@ -307,11 +278,21 @@ public class BattleField : MonoBehaviour {
         double originY = startY;
         var res = PhysicsSim.ComputeTrajectory(startX, originY, physAngle, force, wind, param,
                                                terrain, WORLD_W, WORLD_H, 0.01);
+        // 关键: 高角度时 (int) 截断导致客户端/服务端弹道角度微小差异被放大(1° → 落点偏差大)。
+        // 修正: 最后一个点强制对齐到服务端下发的权威落点(hit_x/hit_y), 保证视觉落点与实际一致。
+        if (!float.IsNaN(serverHitX) && !float.IsNaN(serverHitY) && res.points.Count > 0) {
+            var last = res.points[res.points.Count - 1];
+            last.x = serverHitX;
+            last.y = serverHitY;
+            res.points[res.points.Count - 1] = last;
+        }
         // 防御: 若算出的点太少(<3), 至少补足起止两点保证飞行动画可见
         if (res.points.Count < 3) {
             res.points.Clear();
             res.points.Add(new PhysicsSim.TrajPoint { x = (float)startX, y = (float)originY, t = 0f });
-            res.points.Add(new PhysicsSim.TrajPoint { x = res.hitX, y = res.hitY, t = 1.5f });
+            float endX = float.IsNaN(serverHitX) ? res.hitX : serverHitX;
+            float endY = float.IsNaN(serverHitY) ? res.hitY : serverHitY;
+            res.points.Add(new PhysicsSim.TrajPoint { x = endX, y = endY, t = 1.5f });
         }
         // 炮弹/纸飞机都用真实物理轨迹时间(不做时间重映射):沿轨迹插值, 落地(轨迹结束)才触发 onComplete。
         // 物理时间由 ComputeTrajectory 的 t 值决定(炮弹飞多久就播多久), 飞出上方会落回。
@@ -340,13 +321,15 @@ public class BattleField : MonoBehaviour {
             FollowProjectileCamera(projectile_.transform.position);
             yield return null;
         }
-        DBGLogT("Battle", "FollowProjectile DONE");
+        // 弹丸落地后: 切回 PanFollow 模式(相机停在落点附近, 不留在天空)
+        camMode_ = CamMode.PanFollow;
+        DBGLogT("Battle", "FollowProjectile DONE, cam→PanFollow");
     }
 
-    /// <summary>在命中点爆炸(挖坑 + 4帧动画)。</summary>
+    /// <summary>在命中点爆炸(挖坑 + 视觉特效)。</summary>
     public void Explode(float x, float y, float radius) {
+        Debug.Log($"[Battle] Explode at ({x},{y}) r={radius} terrain={terrain != null}");
         if (terrain) terrain.RemoveCircle(x, y, radius);
-        // 挖坑后高度图降低: 立即把附近玩家重新贴到新地表(实时下落, 不悬空)
         ReSnapPlayersToGround(x, radius);
         StartCoroutine(PlayExplosionAnimBusy(x, y));
     }
@@ -407,41 +390,40 @@ public class BattleField : MonoBehaviour {
     // 爆炸动画: 期间 busyCount_+1(锁相机), 结束后 -1
     private IEnumerator PlayExplosionAnimBusy(float x, float y) {
         busyCount_++;
-        DBGLogT("Battle", $"Explosion +1 → busyCount={busyCount_} at ({x:F0},{y:F0})");
-        yield return PlayExplosionAnim(x, y);
-        busyCount_ = Mathf.Max(0, busyCount_ - 1);
-        DBGLogT("Battle", $"Explosion -1 → busyCount={busyCount_}");
-    }
-
-    // 4帧爆炸动画(explosion0~3): 逐帧变大(40→70→100→130), 每帧 90ms, 按 1f PPU 原尺寸
-    private IEnumerator PlayExplosionAnim(float x, float y) {
         var go = new GameObject("Explosion");
-        go.transform.position = new Vector3(x, y, 0);
         go.transform.SetParent(transform, false);
+        go.transform.position = new Vector3(x, y, -1f);
         var sr = go.AddComponent<SpriteRenderer>();
         sr.sortingOrder = 20;
-        sr.drawMode = SpriteDrawMode.Sliced;
-
+        sr.drawMode = SpriteDrawMode.Simple;
+        // 加载爆炸贴图(4帧逐帧播放); 缺失则用橙红圆兜底
         Sprite[] frames = new Sprite[4];
-        for (int i = 0; i < 4; i++) {
-            frames[i] = LoadSpriteAnyType("Effects/explosion" + i, 1f);
-        }
-        // 逐帧尺寸递增(模拟爆炸扩散); 任一帧贴图缺失用纯色圆兜底, 保证可见
-        float[] sizes = { 50f, 80f, 110f, 140f };
-        float frameDuration = 0.09f;
-        for (int i = 0; i < 4; i++) {
-            if (frames[i] != null) {
-                sr.sprite = frames[i];
+        for (int i = 0; i < 4; i++) frames[i] = LoadSpriteAnyType("Effects/explosion" + i, 1f);
+        bool hasTex = frames[0] != null;
+        if (!hasTex) sr.sprite = SpriteFactory.MakeCircle(100, new Color(1f, 0.5f, 0.1f, 0.9f));
+        sr.color = Color.white;
+        float dur = hasTex ? 0.45f : 0.5f;
+        float el = 0f;
+        while (el < dur) {
+            el += Time.deltaTime;
+            float k = el / dur;
+            if (hasTex) {
+                // 4 帧逐帧切换(每帧 dur/4)
+                int fi = Mathf.Min(3, (int)(k * 4));
+                sr.sprite = frames[fi];
+                float s = 0.5f + k * 1.0f;   // 0.5→1.5 缩放
+                go.transform.localScale = new Vector3(s, s, 1f);
             } else {
-                sr.sprite = SpriteFactory.MakeCircle((int)sizes[i], new Color(1f, 0.6f, 0.2f, 0.9f));
+                float s = 0.3f + k * 1.2f;
+                go.transform.localScale = new Vector3(s, s, 1f);
             }
-            sr.size = new Vector2(sizes[i], sizes[i]);
-            sr.color = Color.white;
-            yield return new WaitForSeconds(frameDuration);
+            Color c = sr.color;
+            c.a = k < 0.5f ? 1f : Mathf.Lerp(1f, 0f, (k - 0.5f) / 0.5f);
+            sr.color = c;
+            yield return null;
         }
-        // 末帧停留一瞬再消失
-        yield return new WaitForSeconds(0.05f);
         Destroy(go);
+        busyCount_ = Mathf.Max(0, busyCount_ - 1);
     }
 
     /// <summary>相机跟随某点(平滑 Lerp)。</summary>
@@ -551,9 +533,12 @@ public class BattleField : MonoBehaviour {
         }
     }
 
-    // 通用贴图加载
+    // 通用贴图加载。
     // pixelsPerUnit: 战斗世界以 1像素=1世界单位 渲染(SpriteFactory/地形/角色均用 1f),
     // 因此炮弹/特效贴图也必须用 1f 才能与地图比例 1:1; UI 场景(大厅)用 100f。
+    // 注: 不做 static 缓存 —— Sprite.Create 绑定的 Texture2D 在场景切换后可能被
+    // Resources.UnloadUnusedAssets 卸载, static 缓存会持有悬垂引用 → 贴图变空。
+    // 爆炸/弹道贴图加载频率低(每回合/每次命中), 不缓存性能影响可忽略。
     internal static Sprite LoadSpriteAnyType(string path, float pixelsPerUnit = 1f) {
         Texture2D tex = Resources.Load<Texture2D>(path);
         if (tex != null)

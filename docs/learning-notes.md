@@ -3321,6 +3321,48 @@ proto3 加字段是非破坏性的：
 
 时间轮和 ORM 是独立的工具模块，可以随时穿插。
 
+---
+
+## 第 14 章 v1.2 长连接多路复用 + DB 双通道 + 客户端动作队列
+
+> v1.2 是「让系统真正跑起来」的版本——v1.1 架构正确但运行时踩了一连串协程/hook/时序的坑。
+
+### 14.1 AsyncSocketStream + RpcStream：RPC 长连接多路复用
+
+**为什么需要**：v1.1 的服务间 RPC 每次调用新建 TCP 连接（短连接），高并发下连接建立开销大；gate→login 的短连接还因 EtcdClient 重对象导致 stack smashing。
+
+**设计**：AsyncSocketStream（`sylar/net/async_socket_stream.{h,cc}`）基于 FiberSemaphore 的协程级异步流——多协程 `enqueue` 入队，单 `doWrite` 协程串行消费。RpcStream（`sylar/rpc/rpc_stream.{h,cc}`）继承它，用 `[4B size][4B request_id][body]` 帧格式实现请求-响应配对：调用方分配 request_id + `Fiber::YieldToHold`，doRead 协程解析响应后按 request_id 匹配唤醒。
+
+**关键踩坑**：doRead 的 `while(isConnected()) { ctx = doRecv(); if(ctx) ctx->doRsp(); }` 在 doRecv 返回 nullptr（连接 EOF）时不 break → 非抢占式协程下永久空转 → 独占 IOManager 线程 → 4 线程打满 → 所有协程饿死。修复：doRecv 返回 nullptr 时 break。
+
+### 14.2 DbWorkerPool 双通道：DB 操作与业务线程解耦
+
+**为什么需要**：data 服务的 19 个 RPC 方法里直接调 `mysql_query`/`redisCommand`，阻塞 IOManager 协程 → 战斗期间 DB 慢查询卡住所有协程。
+
+**设计**：DbWorkerPool（`src/server/data/db_worker.{h,cc}`）用 N 个 std::thread 消费任务队列：`execute`（异步 fire-and-forget，写操作用）+ `query`（submit + onComplete 回调投回 IOManager，读操作用）。
+
+**关键踩坑**：Redis 操作放在 DB 线程（std::thread）里 → sylar hook 全局劫持 fcntl/connect → hiredis 的非阻塞 fd 在 DB 线程里 read 返回 EAGAIN（IOManager::GetThis() 返回 nullptr，hook 异步路径失效）→ redisSet 报 "Resource temporarily unavailable"。修复：Redis 操作移回 RPC 协程同步执行（hook 在协程线程里正常 yield）。
+
+### 14.3 PreparedStmt bind_param 漏调
+
+**现象**：登录报 "account not found"，注册报 "insert fail"。MySQL 里数据存在但查不到。
+
+**根因**：`PreparedStmt::queryRows()` 内部调 `mysql_stmt_bind_result`（绑定输出列）后直接 `mysql_stmt_execute`，但**从未调 `mysql_stmt_bind_param`** → `WHERE name=?` 的 `?` 恒为 NULL → 0 行。
+
+**修复**：在 execute 前补上 `mysql_stmt_bind_param(m_stmt, m_binds.data())`。
+
+### 14.4 BattleActionQueue：客户端串行动作队列
+
+**为什么需要**：客户端用 `resolvingShoot_`/`camFrozenAfterShoot_`/`pendingTurnStart_` 三个布尔 + 5 个协调协程管时序，遇到复杂竞态就死锁。
+
+**设计**：所有战斗消息（ShootResult/TurnStart/GameOver）转 BattleAction 入队，队列串行执行。每个 Action 自己控制 IsDone（轮询式，非回调式）。ShootAction 等 IsBusy 清零（弹道+爆炸+停顿），TurnStartAction 立即完成（提示用独立协程淡出，不阻塞队列）。
+
+### 14.5 etcd PImpl 去除 + C++17 统一
+
+**为什么**：v1.1 用 PImpl 隔离 etcd-cpp-apiv3 的重头文件，但产生了 ~230 行 Impl 胶水代码，且 etcd_client.cc 需要 C++17 而 rest 是 C++11，CMake 用 hack 绕。
+
+**做法**：去掉 3 个 Impl 结构体，.h 直接 include etcd/SyncClient.hpp 等。CMakeLists 全局 `-std=c++17`。
+
 ## 后记
 
 这份笔记是边写代码边学习的过程记录。每个章节的「为什么」都是踩坑后回过头来才想清楚的——如果一开始就这么理解，能少走很多弯路。
@@ -3331,6 +3373,10 @@ proto3 加字段是非破坏性的：
 - **顺序敏感的操作必须有注释**（先算伤害再挖坑、先摘索引再踢）；
 - **客户端默认行为要审查**（Unity runInBackground）；
 - **静态初始化期是最危险的窗口**（gRPC × sylar hook close）；
-- **可观测性要端到端**（traceId）。
+- **可观测性要端到端**（traceId）；
+- **非抢占式协程的 busy-loop 是核弹**：doRead 返回 nullptr 不 break → 独占线程 → 4 线程打满 → 所有协程饿死（v1.2 最惨烈的 bug）；
+- **sylar hook 在裸线程里失效**：DB 线程（std::thread）里 hiredis 的非阻塞 fd read 返回 EAGAIN → Redis 操作不能放 DB 线程（v1.2）；
+- **客户端的状态机要用动作队列**：零散布尔标志（resolvingShoot/camFrozen/shotLocked）的排列组合维护不了复杂时序（v1.2 BattleActionQueue）；
+- **PreparedStmt 的 bind_param 不能漏**：queryRows 内部 execute 前忘了 mysql_stmt_bind_param → 占位符恒 NULL → SELECT 永远 0 行（v1.2 登录 account not found 根因）。
 
 如果这份笔记能让下一个学协程微服务的人少踩一两个坑，它就值了。

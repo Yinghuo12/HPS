@@ -48,11 +48,14 @@ public class NetworkManager : MonoBehaviour {
     // 结束转场：排空并顺序重放所有缓存的包
     public void EndTransition() {
         isTransitioning_ = false;
+        // 锁内只做快照拷贝, 锁外再 Dispatch(避免持锁跑业务 handler 重入 + 拉长锁持有)
+        List<System.Tuple<ushort, byte[]>> snapshot;
         lock (queuedPackets_) {
-            foreach (var p in queuedPackets_) {
-                Dispatcher.Dispatch(p.Item1, p.Item2);
-            }
+            snapshot = new List<System.Tuple<ushort, byte[]>>(queuedPackets_);
             queuedPackets_.Clear();
+        }
+        foreach (var p in snapshot) {
+            Dispatcher.Dispatch(p.Item1, p.Item2);
         }
     }
 
@@ -186,6 +189,7 @@ public class NetworkManager : MonoBehaviour {
     public void MarkLoggedIn() {
         loggedIn_ = true;
         heartbeatTimer_ = heartbeatInterval;
+        ConnState = ReconnectState.None;   // 清除重连状态(连上了, 不再显示重连提示)
     }
 
     // ---- 发送便捷 ----

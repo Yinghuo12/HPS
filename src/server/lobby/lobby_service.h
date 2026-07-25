@@ -46,6 +46,8 @@ public:
     explicit LobbyServiceImpl(const std::string& etcdEndpoint);
     ~LobbyServiceImpl();
 
+    void setRpcPool(std::shared_ptr<sylar::rpc::RpcChannelPool> pool) { m_rpcPool = pool; }
+
     // 设置推送闭包: 由 lobby_main 注入(调用 gate 的 PushService)
     void setPushFn(PushFn fn) {
         m_push = fn;
@@ -86,9 +88,7 @@ private:
     std::shared_ptr<sylar::rpc::RpcChannel> battleChannel();
 
     std::string m_etcdEndpoint;
-    std::shared_ptr<sylar::rpc::RpcChannel> m_dataChannel;
-    std::shared_ptr<sylar::rpc::RpcChannel> m_battleChannel;
-    std::mutex m_channelMutex;
+    std::shared_ptr<sylar::rpc::RpcChannelPool> m_rpcPool;  // 统一 pool(data+battle+push 共用)
 
     mutable sylar::RWMutex m_mutex;
     std::map<uint32_t, std::shared_ptr<LobbyRoom>> m_rooms;

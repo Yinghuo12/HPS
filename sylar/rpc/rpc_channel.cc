@@ -1,5 +1,8 @@
-// RPC 客户端 Channel：实现 protobuf RpcChannel 接口，序列化请求、服务发现、收发响应。
+// RPC 客户端 Channel：实现 protobuf RpcChannel 接口。
+// 有 pool: 基于 RpcStream(AsyncSocketStream) 长连接多路复用, request_id 匹配响应。
+// 无 pool: 短连接模式(每次新建 socket+connect+close), 向后兼容。
 #include "rpc_channel.h"
+#include "rpc_stream.h"
 #include "rpcheader.pb.h"
 #include "rpc_controller.h"
 #include "sylar/core/log.h"
@@ -9,6 +12,7 @@
 #include "sylar/core/endian.h"
 #include "sylar/rpc/etcd_client.h"
 #include "sylar/rpc/rpc_channel_pool.h"
+#include "sylar/scheduler/iomanager.h"
 
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/message.h>
@@ -33,7 +37,197 @@ RpcChannel::RpcChannel(const std::string& etcdEndpoint, RpcChannelPool* pool)
 RpcChannel::~RpcChannel() {
 }
 
-// RPC 调用入口：序列化请求 -> 服务发现 -> 取连接 -> 发送 -> 读响应 -> 反序列化。
+// 构建 RPC 请求包: [4B header_size][RpcHeader][args]
+static std::string buildRequestPacket(
+        const std::string& serviceName, const std::string& methodName,
+        const std::string& argsStr, const std::string& traceId, uint32_t requestId) {
+    sylar::rpc::RpcHeader rpcHeader;
+    rpcHeader.set_service_name(serviceName);
+    rpcHeader.set_method_name(methodName);
+    rpcHeader.set_args_size((uint32_t)argsStr.size());
+    if(!traceId.empty()) {
+        rpcHeader.set_trace_id(traceId);
+    }
+    rpcHeader.set_request_id(requestId);
+
+    std::string rpcHeaderStr;
+    rpcHeader.SerializeToString(&rpcHeaderStr);
+
+    uint32_t headerSize = (uint32_t)rpcHeaderStr.size();
+    uint32_t netHeaderSize = sylar::byteswapOnLittleEndian(headerSize);
+
+    std::string packet;
+    packet.append(reinterpret_cast<char*>(&netHeaderSize), 4);
+    packet.append(rpcHeaderStr);
+    packet.append(argsStr);
+    return packet;
+}
+
+// 服务发现: 从 pool 缓存或 etcd 查址
+static bool discoverService(RpcChannelPool* pool, const std::string& etcdEndpoint,
+                           const std::string& method_path, std::string& ip, uint16_t& port) {
+    if(pool && pool->getDiscovery(method_path, ip, port)) {
+        return true;
+    }
+    EtcdClient cli(etcdEndpoint);
+    EtcdClient::KV kv;
+    if(cli.get(method_path, kv) && !kv.value.empty()) {
+        auto idx = kv.value.find(':');
+        if(idx != std::string::npos) {
+            ip = kv.value.substr(0, idx);
+            port = (uint16_t)atoi(kv.value.substr(idx + 1).c_str());
+            if(pool) {
+                pool->putDiscovery(method_path, ip, port);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+// 短连接模式: 直接 send + readFixSize(向后兼容)
+static void callMethodShort(
+        const MethodDescriptor* method, RpcController* controller,
+        const Message* request, Message* response,
+        const std::string& etcdEndpoint, const std::string& packet,
+        const std::string& serviceName, const std::string& methodName) {
+    std::string method_path = "/" + serviceName + "/" + methodName;
+    std::string ip;
+    uint16_t port = 0;
+    if(!discoverService(nullptr, etcdEndpoint, method_path, ip, port)) {
+        if(controller) {
+            controller->SetFailed(method_path + " not found in etcd");
+        }
+        return;
+    }
+
+    SYLAR_LOG_INFO(g_rpclogger) << "rpc connecting to " << ip << ":" << port;
+
+    IPAddress::ptr addr = IPAddress::Create(ip.c_str(), port);
+    Socket::ptr sock = Socket::CreateTCP(addr);
+    if(!sock->connect(addr)) {
+        if(controller) {
+            controller->SetFailed("connect failed to " + ip + ":" + std::to_string(port));
+        }
+        return;
+    }
+
+    sock->send(packet.c_str(), packet.size());
+
+    // 读响应: [4B total_size][4B request_id][body]
+    sylar::SocketStream ss(sock);
+    uint32_t totalSize = 0;
+    if(ss.readFixSize(&totalSize, sizeof(totalSize)) <= 0) {
+        if(controller) {
+            controller->SetFailed("read response size failed");
+        }
+        sock->close();
+        return;
+    }
+    totalSize = sylar::byteswapOnLittleEndian(totalSize);
+    if(totalSize > 64u * 1024 * 1024) {
+        if(controller) {
+            controller->SetFailed("response size abnormal");
+        }
+        sock->close();
+        return;
+    }
+
+    // 读 request_id(短连接忽略, 只取 body)
+    uint32_t respReqId = 0;
+    if(totalSize >= sizeof(uint32_t)) {
+        ss.readFixSize(&respReqId, sizeof(respReqId));
+        respReqId = sylar::byteswapOnLittleEndian(respReqId);
+        totalSize -= sizeof(uint32_t);
+    }
+
+    std::string respStr;
+    if(totalSize > 0) {
+        respStr.resize(totalSize);
+        if(ss.readFixSize(&respStr[0], totalSize) <= 0) {
+            if(controller) {
+                controller->SetFailed("read response body failed");
+            }
+            sock->close();
+            return;
+        }
+    }
+
+    if(!response->ParseFromString(respStr)) {
+        if(controller) {
+            controller->SetFailed("parse response failed");
+        }
+    }
+    sock->close();
+    SYLAR_LOG_INFO(g_rpclogger) << "rpc call completed: " << serviceName << "." << methodName;
+}
+
+// 多路复用模式: 通过 RpcStream(AsyncSocketStream) 发送 + request_id 匹配
+static void callMethodMultiplexed(
+        const MethodDescriptor* method, RpcController* controller,
+        const Message* request, Message* response,
+        RpcChannelPool* pool, const std::string& packet,
+        const std::string& serviceName, const std::string& methodName,
+        const std::string& etcdEndpoint, uint32_t requestId) {
+    std::string method_path = "/" + serviceName + "/" + methodName;
+    std::string ip;
+    uint16_t port = 0;
+    if(!discoverService(pool, etcdEndpoint, method_path, ip, port)) {
+        if(controller) {
+            controller->SetFailed(method_path + " not found in etcd");
+        }
+        return;
+    }
+
+    // 从连接池获取或创建 RpcStream
+    auto stream = pool->acquireStream(ip, port);
+    if(!stream) {
+        if(controller) {
+            controller->SetFailed("connect failed to " + ip + ":" + std::to_string(port));
+        }
+        return;
+    }
+
+    // 构造请求 Ctx
+    auto ctx = std::make_shared<RpcStream::RpcCtx>();
+    ctx->sn = requestId;
+    ctx->response = response;
+    ctx->fiber = Fiber::GetThis();
+    ctx->scheduler = IOManager::GetThis();
+
+    // 构造发送数据(请求包)
+    struct SendCtxImpl : public AsyncSocketStream::SendCtx {
+        std::string data;
+        bool doSend(AsyncSocketStream::ptr s) override {
+            int64_t rt = s->write(data.data(), data.size());
+            return rt > 0;
+        }
+    };
+    auto sendCtx = std::make_shared<SendCtxImpl>();
+    sendCtx->data = packet;
+
+    // 注册 Ctx 等待响应
+    stream->addCtx(ctx);
+    stream->enqueue(sendCtx);
+
+    // 协程级阻塞: 等 doRead 收到匹配 request_id 的响应后 doRsp 唤醒
+    Fiber::YieldToHold();
+
+    // 恢复后检查结果
+    if(ctx->result == AsyncSocketStream::TIMEOUT) {
+        if(controller) {
+            controller->SetFailed("rpc timeout");
+        }
+    } else if(ctx->result == AsyncSocketStream::IO_ERROR) {
+        if(controller) {
+            controller->SetFailed("io error");
+        }
+    }
+
+    pool->releaseStream(ip, port, stream);
+    SYLAR_LOG_INFO(g_rpclogger) << "rpc call completed(mux): " << serviceName << "." << methodName;
+}
+
 void RpcChannel::CallMethod(
         const MethodDescriptor* method,
         ::google::protobuf::RpcController* controller,
@@ -45,181 +239,42 @@ void RpcChannel::CallMethod(
     std::string serviceName = serviceDesc->name();
     std::string methodName = method->name();
 
-    // 序列化请求参数
+    // 序列化请求
     std::string argsStr;
-    if (!request->SerializeToString(&argsStr)) {
-        if (controller) {
+    if(!request->SerializeToString(&argsStr)) {
+        if(controller) {
             controller->SetFailed("serialize request failed");
         }
         return;
     }
 
-    // 构造 RPC header
-    uint32_t argsSize = argsStr.size();
-    sylar::rpc::RpcHeader rpcHeader;
-    rpcHeader.set_service_name(serviceName);
-    rpcHeader.set_method_name(methodName);
-    rpcHeader.set_args_size(argsSize);
-    // §6: 从 controller 透传 traceId（gate 端 SetTraceId 注入，中间服务继续传递）。
-    // dynamic_cast 因为入参 controller 类型是 google 基类 RpcController。
-    if (controller) {
-        auto* sctrl = dynamic_cast<sylar::rpc::RpcController*>(controller);
-        if (sctrl && !sctrl->TraceId().empty()) {
-            rpcHeader.set_trace_id(sctrl->TraceId());
-        }
+    // 提取 traceId
+    std::string traceId;
+    auto* sctrl = dynamic_cast<RpcController*>(controller);
+    if(sctrl && !sctrl->TraceId().empty()) {
+        traceId = sctrl->TraceId();
     }
 
-    std::string rpcHeaderStr;
-    if (!rpcHeader.SerializeToString(&rpcHeaderStr)) {
-        if (controller) {
-            controller->SetFailed("serialize rpc header failed");
-        }
-        return;
-    }
+    // 生成 request_id
+    static std::atomic<uint32_t> s_nextReqId{1};
+    uint32_t requestId = s_nextReqId.fetch_add(1);
 
-    uint32_t headerSize = rpcHeaderStr.size();
-
-    // 拼接报文：[4-byte header_size][rpc_header][args]
-    std::string packet;
-    uint32_t netHeaderSize = sylar::byteswapOnLittleEndian(headerSize);
-    packet.append(reinterpret_cast<char*>(&netHeaderSize), 4);
-    packet.append(rpcHeaderStr);
-    packet.append(argsStr);
+    // 构建请求包
+    std::string packet = buildRequestPacket(serviceName, methodName, argsStr, traceId, requestId);
 
     SYLAR_LOG_DEBUG(g_rpclogger) << "rpc call: service=" << serviceName
-                                 << " method=" << methodName << " header_size=" << headerSize
-                                 << " args_size=" << argsSize;
+        << " method=" << methodName << " reqId=" << requestId;
 
-    // 服务发现：优先用连接池内置的 TTL 缓存（miss/过期才查 etcd），
-    // 消除每次 RPC 都建 etcd gRPC 连接。
-    std::string method_path = "/" + serviceName + "/" + methodName;
-    std::string ip;
-    uint16_t port = 0;
-    bool found = false;
-    if (m_pool && m_pool->getDiscovery(method_path, ip, port)) {
-        found = true;
+    if(m_pool) {
+        // 多路复用模式
+        callMethodMultiplexed(method, sctrl, request, response,
+            m_pool, packet, serviceName, methodName, m_etcdEndpoint, requestId);
     } else {
-        EtcdClient cli(m_etcdEndpoint);
-        EtcdClient::KV kv;
-        if (cli.get(method_path, kv) && !kv.value.empty()) {
-            int idx = kv.value.find(':');
-            if (idx != -1) {
-                ip = kv.value.substr(0, idx);
-                port = (uint16_t)atoi(kv.value.substr(idx + 1).c_str());
-                found = true;
-                if (m_pool) {
-                    m_pool->putDiscovery(method_path, ip, port);
-                }
-            }
-        }
-    }
-    if (!found) {
-        if (controller) {
-            controller->SetFailed(method_path + " not found in etcd");
-        }
-        return;
-    }
-
-    SYLAR_LOG_INFO(g_rpclogger) << "rpc connecting to " << ip << ":" << port;
-
-    // 连接获取：有连接池则从池借（复用 keep-alive 连接）；
-    // 无池则新建（短连接，向后兼容）。
-    Socket::ptr sock;
-    RpcChannelPool::Guard* guard = nullptr;
-    if (m_pool) {
-        sock = m_pool->acquire(ip, port);
-        if (!sock) {
-            if (controller) {
-                controller->SetFailed("connect failed to " + ip + ":" + std::to_string(port));
-            }
-            return;
-        }
-        // RAII 归还：函数返回（含异常路径）自动归还连接到池
-        guard = new RpcChannelPool::Guard(m_pool, ip, port, sock);
-    } else {
-        IPAddress::ptr addr = IPAddress::Create(ip.c_str(), port);
-        sock = Socket::CreateTCP(addr);
-        if (!sock->connect(addr)) {
-            if (controller) {
-                controller->SetFailed("connect failed to " + ip + ":" + std::to_string(port));
-            }
-            return;
-        }
-    }
-
-    // 发送请求
-    sock->send(packet.c_str(), packet.size());
-
-    // 读响应：[4-byte size][response]
-    sylar::SocketStream ss(sock);
-    uint32_t respSize = 0;
-    if (ss.readFixSize(&respSize, sizeof(respSize)) <= 0) {
-        if (controller) {
-            controller->SetFailed("read response size failed");
-        }
-        // 读失败：连接已坏，从池中淘汰（Guard release 后丢弃，不回池）
-        if (guard) {
-            guard->release();
-            sock->close();
-            delete guard;
-        } else {
-            sock->close();
-        }
-        return;
-    }
-    respSize = sylar::byteswapOnLittleEndian(respSize);
-
-    // 边界保护：respSize 异常大说明连接数据错位（keep-alive 复用时残留/交错），
-    // 直接判失败并淘汰该连接，避免 resize 巨值导致崩溃。
-    if (respSize > 64u * 1024 * 1024) {
-        SYLAR_LOG_ERROR(g_rpclogger) << "rpc response size abnormal: " << respSize
-                                     << ", connection data misaligned, discarding";
-        if (controller) {
-            controller->SetFailed("response size abnormal");
-        }
-        if (guard) {
-            guard->release();
-            sock->close();
-            delete guard;
-        } else {
-            sock->close();
-        }
-        return;
-    }
-
-    std::string respStr;
-    respStr.resize(respSize);
-    // BUG-5 修复：proto3 全默认值消息序列化为 0 字节（如 ResultResp{SUCCESS=0,msg=""}），
-    // readFixSize(buf,0) 返回 0 会误判失败。0 字节响应是合法空消息，直接进反序列化。
-    if (respSize > 0 && ss.readFixSize(&respStr[0], respSize) <= 0) {
-        if (controller) {
-            controller->SetFailed("read response body failed");
-        }
-        if (guard) {
-            guard->release();
-            sock->close();
-            delete guard;
-        } else {
-            sock->close();
-        }
-        return;
-    }
-
-    // 反序列化响应
-    if (!response->ParseFromString(respStr)) {
-        if (controller) {
-            controller->SetFailed("parse response failed");
-        }
-    }
-
-    SYLAR_LOG_INFO(g_rpclogger) << "rpc call completed: " << serviceName << "." << methodName;
-    // 连接复用：有池则归还（Guard 析构），无池则 close（短连接）
-    if (guard) {
-        delete guard;   // Guard 析构 → release（健康则回池）
-    } else {
-        sock->close();
+        // 短连接模式(向后兼容)
+        callMethodShort(method, sctrl, request, response,
+            m_etcdEndpoint, packet, serviceName, methodName);
     }
 }
 
-}   // namespace rpc
-}   // namespace sylar
+} // namespace rpc
+} // namespace sylar

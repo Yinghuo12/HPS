@@ -10,9 +10,12 @@
 #include <string>
 
 #include "sylar/net/socket.h"
+#include "sylar/net/async_socket_stream.h"
 
 namespace sylar {
 namespace rpc {
+
+class RpcStream;  // 前置声明
 
 // RPC 客户端连接池 + 服务发现缓存：用 socket 池化消除每次 connect/close 开销，
 // 用带 TTL 的发现缓存消除每次 etcd 服务发现的开销。
@@ -32,6 +35,13 @@ public:
 
     // 归还 socket。健康（isConnected）则放回空闲池; 已断则丢弃（减少 outstanding 计数）。
     void release(const std::string& ip, uint16_t port, sylar::Socket::ptr sock);
+
+    // ---- 多路复用(AsyncSocketStream) ----
+    // 借一个 RpcStream(封装 Socket 为 AsyncSocketStream, 支持长连接多路复用)。
+    // 首次借出时 start()(启动 doRead+doWrite); 归还时不 close, 下次复用。
+    std::shared_ptr<RpcStream> acquireStream(const std::string& ip, uint16_t port);
+    // 归还 RpcStream(不断开, 放回池供复用)。
+    void releaseStream(const std::string& ip, uint16_t port, std::shared_ptr<RpcStream> stream);
 
     // ---- 服务发现缓存（带 TTL） ----
     // 查 method_path（如 "/BattleService/Shoot"）对应的 ip:port。
@@ -95,10 +105,12 @@ private:
 
     std::string m_etcdEndpoint;
     size_t m_maxSizePerHost;
-    // 连接池
+    // 连接池(裸 Socket)
     std::mutex m_mutex;
     std::condition_variable m_cv;
     std::map<std::string, HostPool> m_hosts;
+    // 连接池(RpcStream 多路复用)
+    std::map<std::string, std::list<std::shared_ptr<RpcStream>>> m_streamPool;
     // 服务发现缓存
     std::map<std::string, DiscoveryEntry> m_discovery;
     uint64_t m_discoveryTtlMs;  // 发现缓存 TTL（默认 5000ms）

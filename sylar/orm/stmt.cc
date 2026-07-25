@@ -217,6 +217,14 @@ std::vector<std::map<std::string, Value> > PreparedStmt::queryRows() {
     if(mysql_stmt_bind_result(m_stmt, ob.data())) {
         return rows;
     }
+    // 绑定输入参数(WHERE name=? 等占位符)。
+    // 注意: bind_result 绑的是输出列, 与输入参数绑定(bind_param)是两套独立缓冲,
+    // 必须分开提交; 早期实现遗漏此步导致占位符恒为 NULL → 查询永远 0 行。
+    if(!m_binds.empty()) {
+        if(mysql_stmt_bind_param(m_stmt, m_binds.data())) {
+            return rows;
+        }
+    }
     if(mysql_stmt_execute(m_stmt)) {
         return rows;
     }

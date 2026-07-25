@@ -24,10 +24,12 @@ int main(int argc, char** argv) {
         tw->init(1000, 60);
         tw->start(&iom);
 
+        // RPC 连接池: 4 个下游服务统一走多路复用长连接, 替代原短连接模式。
+        auto rpcPool = std::make_shared<sylar::rpc::RpcChannelPool>(cfg.etcd_endpoint, 8);
+
         // 客户端 TCP 入口 (GateServer: 持 session, 处理 msg_id 分发)
-        // 注: 下游 RPC channel 用短连接(无连接池)——连接池在 sylar hook 模型下
-        //     存在 fd 复用竞态(addEvent assert), 已回退。
         auto gate = std::make_shared<ddt::GateServer>(cfg, cfg.etcd_endpoint, tw);
+        gate->setRpcPool(rpcPool);
         gate->setRedis(cfg.redis_host, cfg.redis_port);   // 用于订阅世界聊天
         auto addr = sylar::IPAddress::Create(cfg.host.c_str(), cfg.port);
         if(!gate->bind(addr)) {
@@ -54,7 +56,8 @@ int main(int argc, char** argv) {
         provider->run();
 
         static std::shared_ptr<ddt::GateServer> g_keepalive = gate;
-        static std::shared_ptr<sylar::TimeWheel> g_tw = tw;   // 保活时间轮
+        static std::shared_ptr<sylar::TimeWheel> g_tw = tw;
+        static std::shared_ptr<sylar::rpc::RpcChannelPool> g_rpcPool = rpcPool;
     });
 
     runner.installSignal();

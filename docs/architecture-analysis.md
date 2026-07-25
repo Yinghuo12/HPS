@@ -7,7 +7,7 @@
 | 分析对象 | TinyDDT（仿弹弹堂，回合制弹道射击游戏） |
 | 仓库根 | `/Users/yinghuo/OrbStack/ubuntu/home/yinghuo/code/proj/sylar` |
 | 范围 | sylar 框架层 + `src/` 业务层（五服务微服务 + Unity 客户端） |
-| 基线 | 反映 §2/§6/§10/§13/§15 + login 栈修复 + fleet.sh + 客户端诊断日志全量改造后的状态 |
+| 基线 | 反映 v1.2：AsyncSocketStream/RpcStream 长连接多路复用 + DbWorkerPool 双通道 + etcd PImpl 去除/C++17 + BattleActionQueue 客户端动作队列 + doRead busy-loop 根因修复后的状态 |
 
 ## 目录
 
@@ -37,9 +37,9 @@
 | 层 | 技术 | 源码证据 |
 |----|------|---------|
 | 框架 | sylar（ucontext 协程 + epoll） | `sylar/scheduler/{fiber,iomanager}.h` |
-| 语言 | C++11（`etcd_client.cc` 单独 C++17） | `CMakeLists.txt:8` `-std=c++11` |
+| 语言 | C++17（全局统一，v1.2 去 PImpl 后不再有例外） | `CMakeLists.txt` `-std=c++17` |
 | 序列化 | Protobuf | `find_package(Protobuf REQUIRED)`（`CMakeLists.txt:91`） |
-| 通信 | TCP 长连接（客户端↔gate）+ 短/池化 RPC（服务间） | `src/common/frame.h`、`sylar/rpc/rpc_channel.h` |
+| 通信 | TCP 长连接（客户端↔gate）+ RPC 长连接多路复用（服务间，request_id 匹配） | `src/common/frame.h`、`sylar/rpc/rpc_stream.h`、`sylar/net/async_socket_stream.h` |
 | 服务发现 | etcd v3（etcd-cpp-apiv3） | `sylar/rpc/etcd_client.h`、`thirdparty/etcd` |
 | 数据库 | MySQL（ORM） | `sylar/orm/`、`libmysqlclient`（`src/CMakeLists.txt:76`） |
 | 缓存 | Redis（token + 在线状态 + 世界聊天 Pub/Sub，**连接池 + 独立订阅线程**） | `src/server/data/redis_pool.h`、`-lhiredis`（`src/CMakeLists.txt:76`）；详见 §5.4-§5.6 |

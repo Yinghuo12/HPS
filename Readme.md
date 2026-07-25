@@ -27,6 +27,49 @@ TinyDDT（仿弹弹堂）是一款基于 C/S 架构的实时多人回合制弹�
 - MySQL 连接池 + Redis 缓存：账号/对局持久化，会话 token 与在线状态管理
 
 ## 展示
+|  |  |
+| ---- | ---- |
+| ![选择角色](assets/v1.0_1.png) | ![更换武器](assets/v1.0_2.png) |
+| ![战斗与聊天](assets/v1.0_3.png) | ![结算](assets/v1.0_4.png) |
+
+### v1.2 20260726 更新
+
+v1.2 为 **长连接多路复用 + DB 双通道解耦 + 客户端动作队列** 版本：服务端全链路 RPC 改长连接多路复用（AsyncSocketStream + RpcStream + request_id 匹配），data 服务 DB 操作经双通道 DbWorkerPool 解耦，etcd PImpl 去除 + 全局 C++17 统一；客户端引入 BattleActionQueue 串行动作队列替代零散布尔标志系统，修复了一系列协程 busy-loop 导致的 CPU 打满和卡死问题。
+
+#### 框架层（sylar/）
+
+- **AsyncSocketStream + FiberSemaphore**：新增 `async_socket_stream.{h,cc}`，基于协程级信号量的异步 Socket 流，多协程 enqueue + 单 doWrite 协程串行消费。GateSendStream 继承它替代手搓 sendQueue
+- **RpcStream 长连接多路复用**：新增 `rpc_stream.{h,cc}`，继承 AsyncSocketStream，实现 `[4B size][4B request_id][body]` 帧格式 + request_id 匹配唤醒等待协程。rpcheader.proto 加 `request_id` 字段
+- **RpcChannel 双路径**：`rpc_channel.cc` 重写为 `callMethodMultiplexed`（有 pool，长连接多路复用）+ `callMethodShort`（无 pool，短连接兼容）。RpcProvider 改循环处理 + sendResponse 不关连接
+- **RpcChannelPool 流管理**：`acquireStream/releaseStream` 管理 RpcStream 实例池
+- **etcd PImpl 去除 + C++17 统一**：`etcd_client.{h,cc}` 去掉 3 个 Impl 结构体（~230 行），直接 include etcd 头文件；CMakeLists `-std=c++11` → `-std=c++17`
+- **PreparedStmt 修复**：`orm/stmt.cc` `queryRows()` 补上 `mysql_stmt_bind_param`（原来漏了导致 `WHERE name=?` 占位符恒 NULL → 查询永远 0 行 → 登录报 account not found）
+- **doRead busy-loop 根因修复**：`async_socket_stream.cc` `doRead` 在 `doRecv` 返回 nullptr 时 break（原来不 break → 非抢占式协程下独占线程 → 4 线程打满 → 所有协程饿死 → 客户端卡死）
+
+#### 服务端业务层（src/server/）
+
+- **DbWorkerPool 双通道**：新增 `db_worker.{h,cc}`，`execute`（异步 fire-and-forget）+ `query`（同步等结果 onComplete 回调）双通道。data 的 19 个 RPC 方法改双通道 + 16 处 esc() 裸 SQL 改 PreparedStmt
+- **Redis 操作移出 DB 线程**：SaveToken/LoadToken/SetOnline 等移回 RPC 协程同步（DB 线程下 sylar hook 使 hiredis 非阻塞 fd 的 read 返回 EAGAIN）
+- **聊天持久化重设计**：WORLD → Redis List（LPUSH/LTRIM/LRANGE），ROOM/TEAM → 不落盘，PRIVATE → MySQL
+- **gate 全服务 RPC 池化**：4 个服务（gate→login/lobby/battle/data）全改 RpcChannelPool 长连接
+- **gate KICK 同步发送**：`kickExistingSession` 改用 `sock->send` 同步发 KICK_NOTIFY + 延迟 200ms close（原来异步入队列后立即 close → KICK 没发出去 → 自动重连死循环）
+- **battle urgent broadcast**：ShootResult/TurnStart/GameOver 同步推送（不走 schedule），避免 MoveNotify 积压延迟
+- **battle 友军伤害**：自己/同队受 AOE 但 HP 最低保 1（不致死），坠落照死（不分敌友）；同归于尽判出手方胜
+
+#### 客户端（src/client/）
+
+- **BattleActionQueue**：新增 `BattleActionQueue.cs`（BattleAction 基类 + ShootAction/TurnStartAction/GameOverAction + 串行调度器），替代 `resolvingShoot_`/`camFrozenAfterShoot_`/`pendingTurnStart_` 三个布尔 + 5 个协调协程。消息到达转 Action 入队，队列串行执行，每个 Action 自己控制 IsDone
+- **PlayerEntity 位置插值**：远程玩家 lerp 平滑（消除 15px RPC 跳变），本机直接定位；新增 ForcePosition（降落动画用）
+- **开场序列简化**：PlayLanding+PlayIntro 多阶段 → 固定时长降落+巡视+收尾，不依赖 WaitUntilCamReachedOrTimeout
+- **爆炸动画重写**：Simple 模式 + localScale 缩放 + 贴图 4 帧逐帧播放
+- **高角度落点修正**：PlayTrajectory 最后轨迹点对齐服务端 hit_x/hit_y
+- **shotLocked_ 超时 + KICK 战斗订阅 + 重连状态清除**：多项健壮性修复
+
+#### 运维
+
+- **fleet.sh**：`kill_all_ddt` 改 SIGKILL 优先（busy-loop 进程无法响应 SIGTERM）
+
+详见 👉 **[docs/v1.2.md](docs/v1.2.md)**
 
 ### v1.1 20260720 更新
 
@@ -60,10 +103,7 @@ v1.1 为 **生产化与可观测性** 版本：补全了可观测性（traceId +
 
 客户端使用 `unity` 重构项目，实现基本功能与玩法。服务端由单进程三层演化为 **gate / login / lobby / battle / data 五服务微服务**，服务发现 ZooKeeper → **etcd**，通信 WebSocket → **TCP 长连接 + Protobuf**。
 
-|  |  |
-| ---- | ---- |
-| ![选择角色](assets/v1.0_1.png) | ![更换武器](assets/v1.0_2.png) |
-| ![战斗与聊天](assets/v1.0_3.png) | ![结算](assets/v1.0_4.png) |
+
 
 
 ### v0.3
@@ -121,6 +161,7 @@ UI界面
 
 | 版本 | 说明 | 文档 |
 |------|------|------|
+| **v1.2** | **长连接多路复用 + DB 双通道解耦 + 客户端动作队列** — AsyncSocketStream/RpcStream 长连接多路复用、DbWorkerPool 双通道、etcd PImpl 去除+C++17、PreparedStmt 修复、doRead busy-loop 根因修复、BattleActionQueue 串行动作队列、多项客户端时序/视觉修复 | [v1.2.md](docs/v1.2.md) |
 | **v1.1** | **生产化与可观测性** — traceId 透传、DB 密码环境变量化、Redis 连接池、多人战绩落库、在线状态、世界聊天 Pub/Sub、全项目代码风格统一 | [v1.1.md](docs/v1.1.md) |
 | v1.0 | 架构级重构 — 客户端重写为 Unity(C#)、服务端五服务微服务化（gate/login/lobby/battle/data）、ZooKeeper→etcd、WebSocket→TCP 长连接 | [v1.0.md](docs/v1.0.md) |
 | v0.4 | ORM 模块 + 项目级目录重组 | [v0.4.md](docs/v0.4.md) |
@@ -138,7 +179,35 @@ sylar 协程框架的逐模块学习笔记（Version 1-17：日志/配置/线程
 
 ---
 
-# DDT 弹弹堂 — 项目文档 v1.1
+# DDT 弹弹堂 — 项目文档
+
+## v1.2 摘要
+
+v1.2 为**长连接多路复用 + DB 双通道解耦 + 客户端动作队列**版本：
+
+### 框架层
+- **AsyncSocketStream + RpcStream**：协程级异步 Socket 流 + RPC 请求-响应配对（request_id 匹配）
+- **RpcChannel 多路复用**：长连接多路复用 + 短连接兼容双路径；RpcProvider 改长连接循环
+- **etcd PImpl 去除 + C++17 统一**
+- **PreparedStmt bind_param 修复**（登录 account not found 根因）
+- **doRead busy-loop 根因修复**（服务端 CPU 100% + 客户端卡死根因）
+
+### 服务端
+- **DbWorkerPool 双通道**：execute(异步) + query(同步回调) 双通道解耦 DB 操作
+- **Redis 操作移出 DB 线程**（hook EAGAIN 根因）
+- **gate 全服务 RPC 池化 + KICK 同步发送**
+- **battle urgent broadcast + 友军伤害 + 同归于尽**
+
+### 客户端
+- **BattleActionQueue**：串行动作队列替代布尔标志 + 协调协程
+- **位置插值 + 开场简化 + 爆炸重写 + 高角度落点修正**
+- **shotLocked 超时 + KICK 战斗订阅 + 重连状态清除**
+
+> 完整架构、通信协议、服务端/客户端模块、RPC 框架、构建部署、实现细节与版本对比，详见 👉 **[docs/v1.2.md](docs/v1.2.md)**
+
+---
+
+## v1.1 摘要
 
 v1.1 为**生产化与可观测性**版本，相对 v1.0 的主要变化：
 

@@ -61,6 +61,7 @@ set(DDT_COMMON_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/common/terrain2d.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/server/service_base.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/server/data/redis_pool.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/data/db_worker.cc
 )
 set(DDT_PB_SRC
     ${DDT_PB_DIR}/common.pb.cc
